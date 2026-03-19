@@ -40,3 +40,6 @@ benchmarkDotNet.Artifacts/
 .DS_Store
 Thumbs.db
 
+# Planning documents
+INITIAL_PLAN.md
+plans/
