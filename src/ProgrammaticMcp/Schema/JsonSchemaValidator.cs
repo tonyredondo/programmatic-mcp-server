@@ -2,16 +2,28 @@ using System.Text.Json.Nodes;
 
 namespace ProgrammaticMcp;
 
+/// <summary>
+/// Exception thrown when a JSON value does not satisfy a schema.
+/// </summary>
 public sealed class JsonSchemaValidationException : Exception
 {
+    /// <summary>
+    /// Creates a validation exception with the supplied message.
+    /// </summary>
     public JsonSchemaValidationException(string message)
         : base(message)
     {
     }
 }
 
+/// <summary>
+/// Validates JSON payloads against the subset of JSON Schema used by the library.
+/// </summary>
 public static class JsonSchemaValidator
 {
+    /// <summary>
+    /// Validates a JSON value against a JSON schema document.
+    /// </summary>
     public static void Validate(JsonNode? value, JsonNode schema)
     {
         ValidateNode(value, schema, "$");

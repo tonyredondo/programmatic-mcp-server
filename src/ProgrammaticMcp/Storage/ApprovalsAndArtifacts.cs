@@ -5,6 +5,9 @@ using System.Text.Json.Nodes;
 
 namespace ProgrammaticMcp;
 
+/// <summary>
+/// Request used when persisting an artifact to the built-in store.
+/// </summary>
 public sealed record ArtifactWriteRequest(
     string ArtifactId,
     string ConversationId,
@@ -15,10 +18,19 @@ public sealed record ArtifactWriteRequest(
     string Content,
     DateTimeOffset ExpiresAt);
 
+/// <summary>
+/// Request used when reading an artifact from the built-in store.
+/// </summary>
 public sealed record ArtifactReadRequest(string ArtifactId, string ConversationId, string CallerBindingId);
 
+/// <summary>
+/// A single artifact chunk returned from storage.
+/// </summary>
 public sealed record ArtifactChunk(int Index, string Content, int Bytes);
 
+/// <summary>
+/// Result returned when reading an artifact from storage.
+/// </summary>
 public sealed record ArtifactReadResult(
     bool Found,
     string? ArtifactId,
@@ -30,6 +42,9 @@ public sealed record ArtifactReadResult(
     int? TotalBytes,
     DateTimeOffset? ExpiresAt);
 
+/// <summary>
+/// Retention and chunking settings for the built-in artifact store.
+/// </summary>
 public sealed record ArtifactRetentionOptions(
     int ArtifactTtlSeconds,
     int MaxArtifactBytesPerArtifact,
@@ -38,33 +53,61 @@ public sealed record ArtifactRetentionOptions(
     int MaxArtifactBytesGlobal,
     int ArtifactChunkBytes);
 
+/// <summary>
+/// Writes execution artifacts through the current host binding.
+/// </summary>
 public interface IArtifactWriter
 {
+    /// <summary>
+    /// Writes a JSON artifact.
+    /// </summary>
     ValueTask<ExecutionArtifactDescriptor> WriteJsonArtifactAsync(string name, JsonNode payload, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Writes a text artifact.
+    /// </summary>
     ValueTask<ExecutionArtifactDescriptor> WriteTextArtifactAsync(string name, string content, string mimeType, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Stores and retrieves execution artifacts.
+/// </summary>
 public interface IArtifactStore
 {
+    /// <summary>
+    /// Writes an artifact record.
+    /// </summary>
     ValueTask WriteAsync(ArtifactWriteRequest request, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Reads an artifact record.
+    /// </summary>
     ValueTask<ArtifactReadResult> ReadAsync(ArtifactReadRequest request, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Removes expired artifacts.
+    /// </summary>
     ValueTask SweepExpiredAsync(CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// In-memory artifact store used by the default implementation.
+/// </summary>
 public sealed class InMemoryArtifactStore : IArtifactStore
 {
     private readonly ConcurrentDictionary<string, StoredArtifact> _entries = new(StringComparer.Ordinal);
     private readonly ArtifactRetentionOptions _options;
     private readonly object _gate = new();
 
+    /// <summary>
+    /// Creates a new in-memory artifact store.
+    /// </summary>
     public InMemoryArtifactStore(ArtifactRetentionOptions options)
     {
         _options = options;
     }
 
+    /// <inheritdoc />
     public ValueTask WriteAsync(ArtifactWriteRequest request, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -115,6 +158,7 @@ public sealed class InMemoryArtifactStore : IArtifactStore
         return ValueTask.CompletedTask;
     }
 
+    /// <inheritdoc />
     public ValueTask<ArtifactReadResult> ReadAsync(ArtifactReadRequest request, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -145,6 +189,7 @@ public sealed class InMemoryArtifactStore : IArtifactStore
         }
     }
 
+    /// <inheritdoc />
     public ValueTask SweepExpiredAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -232,6 +277,9 @@ public sealed class InMemoryArtifactStore : IArtifactStore
     }
 }
 
+/// <summary>
+/// Stored approval record used by the mutation approval flow.
+/// </summary>
 public sealed record PendingApproval(
     string ApprovalId,
     string ApprovalNonce,
@@ -247,33 +295,61 @@ public sealed record PendingApproval(
     DateTimeOffset? ApplyingSinceUtc,
     string? FailureCode);
 
+/// <summary>
+/// Result of an approval state transition attempt.
+/// </summary>
 public sealed record ApprovalTransitionResult(
     ApprovalTransitionStatus Status,
     PendingApproval? Approval);
 
+/// <summary>
+/// Stores and manages pending approvals.
+/// </summary>
 public interface IApprovalStore
 {
+    /// <summary>
+    /// Creates a new approval record.
+    /// </summary>
     ValueTask CreateAsync(PendingApproval approval, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Gets an approval record by identifier.
+    /// </summary>
     ValueTask<PendingApproval?> GetAsync(string approvalId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Lists pending approvals for a conversation and caller binding.
+    /// </summary>
     ValueTask<IReadOnlyList<PendingApproval>> ListPendingAsync(string conversationId, string callerBindingId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Attempts to transition an approval from an expected state.
+    /// </summary>
     ValueTask<ApprovalTransitionResult> TryTransitionAsync(
         string approvalId,
         ApprovalState expectedState,
         Func<PendingApproval, PendingApproval> transition,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Lists every approval currently stored.
+    /// </summary>
     ValueTask<IReadOnlyList<PendingApproval>> ListAllAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Removes expired approvals.
+    /// </summary>
     ValueTask SweepExpiredAsync(CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// In-memory approval store used by the default implementation.
+/// </summary>
 public sealed class InMemoryApprovalStore : IApprovalStore
 {
     private readonly ConcurrentDictionary<string, ApprovalEntry> _entries = new(StringComparer.Ordinal);
 
+    /// <inheritdoc />
     public ValueTask CreateAsync(PendingApproval approval, CancellationToken cancellationToken = default)
     {
         if (!_entries.TryAdd(approval.ApprovalId, new ApprovalEntry(approval)))
@@ -284,12 +360,14 @@ public sealed class InMemoryApprovalStore : IApprovalStore
         return ValueTask.CompletedTask;
     }
 
+    /// <inheritdoc />
     public ValueTask<PendingApproval?> GetAsync(string approvalId, CancellationToken cancellationToken = default)
     {
         CleanupExpired(DateTimeOffset.UtcNow);
         return ValueTask.FromResult(_entries.TryGetValue(approvalId, out var entry) ? entry.Current : null);
     }
 
+    /// <inheritdoc />
     public ValueTask<IReadOnlyList<PendingApproval>> ListPendingAsync(string conversationId, string callerBindingId, CancellationToken cancellationToken = default)
     {
         CleanupExpired(DateTimeOffset.UtcNow);
@@ -304,6 +382,7 @@ public sealed class InMemoryApprovalStore : IApprovalStore
         return ValueTask.FromResult<IReadOnlyList<PendingApproval>>(results);
     }
 
+    /// <inheritdoc />
     public ValueTask<IReadOnlyList<PendingApproval>> ListAllAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -311,6 +390,7 @@ public sealed class InMemoryApprovalStore : IApprovalStore
         return ValueTask.FromResult<IReadOnlyList<PendingApproval>>(_entries.Values.Select(static entry => entry.Current).OrderBy(static approval => approval.CreatedAt).ToArray());
     }
 
+    /// <inheritdoc />
     public async ValueTask<ApprovalTransitionResult> TryTransitionAsync(
         string approvalId,
         ApprovalState expectedState,
@@ -340,6 +420,7 @@ public sealed class InMemoryApprovalStore : IApprovalStore
         }
     }
 
+    /// <inheritdoc />
     public ValueTask SweepExpiredAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -347,6 +428,9 @@ public sealed class InMemoryApprovalStore : IApprovalStore
         return ValueTask.CompletedTask;
     }
 
+    /// <summary>
+    /// Recovers approvals that have been stuck in the applying state for too long.
+    /// </summary>
     public async ValueTask<int> RecoverStaleApplyingAsync(
         TimeSpan staleThreshold,
         Func<PendingApproval, PendingApproval> transition,
@@ -407,8 +491,14 @@ public sealed class InMemoryApprovalStore : IApprovalStore
     }
 }
 
+/// <summary>
+/// Generates approval identifiers and nonces.
+/// </summary>
 public static class ApprovalTokenGenerator
 {
+    /// <summary>
+    /// Generates a new approval identifier.
+    /// </summary>
     public static string GenerateApprovalId()
     {
         Span<byte> bytes = stackalloc byte[16];
@@ -426,6 +516,9 @@ public static class ApprovalTokenGenerator
         return new Guid(bytes).ToString();
     }
 
+    /// <summary>
+    /// Generates a new approval nonce.
+    /// </summary>
     public static string GenerateApprovalNonce()
     {
         Span<byte> bytes = stackalloc byte[16];
@@ -434,14 +527,29 @@ public static class ApprovalTokenGenerator
     }
 }
 
+/// <summary>
+/// Inputs used when resolving a caller binding.
+/// </summary>
 public sealed record CallerBindingContext(string? PrincipalIdentity, string? SessionIdentity, string? TransportFallbackIdentity);
 
+/// <summary>
+/// Resolves caller binding identifiers from transport and principal inputs.
+/// </summary>
 public interface ICallerBindingAccessor
 {
+    /// <summary>
+    /// Resolves a stable caller binding identifier.
+    /// </summary>
     ValueTask<string?> GetCallerBindingIdAsync(CallerBindingContext context, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Strategy interface for caller binding resolution.
+/// </summary>
 public interface ICallerBindingStrategy
 {
+    /// <summary>
+    /// Resolves a stable caller binding identifier.
+    /// </summary>
     ValueTask<string?> ResolveAsync(CallerBindingContext context, CancellationToken cancellationToken = default);
 }

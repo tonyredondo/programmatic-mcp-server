@@ -547,6 +547,30 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     }
 
     [Fact]
+    public async Task StartupWarnsWhenInMemoryArtifactBudgetIsOversized()
+    {
+        using var loggerProvider = new TestLoggerProvider();
+
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureLogging: logging => logging.AddProvider(loggerProvider),
+            configureOptions: options =>
+            {
+                options.ExecutorOptions = options.ExecutorOptions with
+                {
+                    ArtifactRetention = options.ExecutorOptions.ArtifactRetention with
+                    {
+                        MaxArtifactBytesGlobal = int.MaxValue
+                    }
+                };
+            });
+
+        Assert.Contains(
+            loggerProvider.Entries,
+            entry => entry.Level == LogLevel.Warning
+                && entry.Message.Contains("Configured in-memory artifact limit", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task InMemoryApprovalsAndArtifactsClearOnProcessRestart()
     {
         string approvalId;
@@ -618,6 +642,58 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
                 ["artifactId"] = artifactId
             });
         Assert.False(ParseStructuredContent(artifactRead)["found"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task ApprovalSnapshotsEvictOldCursorsWhenThePerCallerLimitIsExceeded()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.MaxApprovalListSnapshotsPerCallerBinding = 2);
+        var cookieContainer = new CookieContainer();
+        await using var client = host.CreateRawClient(cookieContainer: cookieContainer);
+        await client.InitializeAsync();
+
+        foreach (var taskId in new[] { "task-snapshot-1", "task-snapshot-2", "task-snapshot-3" })
+        {
+            var code = """
+                       async function main() {
+                           return await programmatic.tasks.complete({ taskId: "__TASK_ID__" });
+                       }
+                       """.Replace("__TASK_ID__", taskId, StringComparison.Ordinal);
+
+            var preview = await client.CallToolAsync(
+                "code.execute",
+                new JsonObject
+                {
+                    ["conversationId"] = "conv-snapshot-evict",
+                    ["code"] = code
+                });
+            Assert.False(preview.IsError, preview.StructuredContent.ToJsonString());
+        }
+
+        var first = await client.CallToolAsync(
+            "mutation.list",
+            new JsonObject
+            {
+                ["conversationId"] = "conv-snapshot-evict",
+                ["limit"] = 1
+            });
+        var firstCursor = first.StructuredContent["nextCursor"]?.GetValue<string>();
+
+        _ = await client.CallToolAsync("mutation.list", new JsonObject { ["conversationId"] = "conv-snapshot-evict" });
+        _ = await client.CallToolAsync("mutation.list", new JsonObject { ["conversationId"] = "conv-snapshot-evict" });
+
+        Assert.NotNull(firstCursor);
+        var stale = await client.CallToolAsync(
+            "mutation.list",
+            new JsonObject
+            {
+                ["conversationId"] = "conv-snapshot-evict",
+                ["cursor"] = firstCursor
+            });
+
+        Assert.True(stale.IsError);
+        Assert.Equal("invalid_params", stale.StructuredContent["error"]!["code"]!.GetValue<string>());
     }
 
     [Fact]
@@ -820,8 +896,10 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         await stopTask;
 
         Assert.Equal("released", execution.StructuredContent["result"]!.GetValue<string>());
-        Assert.Contains(activityCollector.CompletedActivities, activity => activity.OperationName == "programmatic.tool.call");
+        var toolActivity = Assert.Single(activityCollector.CompletedActivities, activity => activity.OperationName == "programmatic.tool.call");
+        Assert.Equal("code.execute", toolActivity.Tags.Single(tag => tag.Key == "mcp.tool.name").Value);
         Assert.Contains(loggerProvider.Entries, entry => entry.Message.Contains("Programmatic code execution finished.", StringComparison.Ordinal));
+        Assert.Contains(loggerProvider.Entries, entry => entry.Message.Contains("ApiCalls=", StringComparison.Ordinal));
     }
 
     private static JsonObject ParseStructuredContent(CallToolResult result)

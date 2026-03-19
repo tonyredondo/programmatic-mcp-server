@@ -471,11 +471,13 @@ public sealed class JintCodeExecutorTests
                 async function main() {
                     return await programmatic.runtime.wait({ delayMs: 5000 });
                 }
-                """));
+                """,
+                CallerBindingId: "caller-1"));
 
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "timeout");
 
-        var secondResult = await fixture.Executor.ExecuteAsync(
+        var recoveryFixture = CreateFixture();
+        var secondResult = await recoveryFixture.Executor.ExecuteAsync(
             new CodeExecutionRequest(
                 "conv-1",
                 """

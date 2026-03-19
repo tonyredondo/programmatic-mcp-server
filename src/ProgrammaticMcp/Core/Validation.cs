@@ -3,12 +3,21 @@ using System.Text.RegularExpressions;
 
 namespace ProgrammaticMcp;
 
+/// <summary>
+/// Validates conversation identifiers used by the public contract.
+/// </summary>
 public static class ConversationIdValidator
 {
     private static readonly Regex ConversationIdExpression = new("^[A-Za-z0-9._:-]{1,128}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// Determines whether the supplied conversation identifier matches the allowed pattern.
+    /// </summary>
     public static bool IsValid(string conversationId) => ConversationIdExpression.IsMatch(conversationId);
 
+    /// <summary>
+    /// Throws when the supplied conversation identifier does not match the allowed pattern.
+    /// </summary>
     public static void EnsureValid(string conversationId)
     {
         if (!IsValid(conversationId))
@@ -18,10 +27,19 @@ public static class ConversationIdValidator
     }
 }
 
+/// <summary>
+/// Validates public schema version numbers.
+/// </summary>
 public static class SchemaVersionValidator
 {
+    /// <summary>
+    /// Determines whether the supplied schema version is supported.
+    /// </summary>
     public static bool IsSupported(int schemaVersion) => schemaVersion == ProgrammaticContractConstants.SchemaVersion;
 
+    /// <summary>
+    /// Throws when the supplied schema version is not supported.
+    /// </summary>
     public static void EnsureSupported(int schemaVersion)
     {
         if (!IsSupported(schemaVersion))
@@ -32,6 +50,9 @@ public static class SchemaVersionValidator
     }
 }
 
+/// <summary>
+/// Utility helpers for API path validation and naming.
+/// </summary>
 public static class ApiPathUtilities
 {
     private static readonly HashSet<string> ReservedSegments = new(StringComparer.Ordinal)
@@ -50,6 +71,9 @@ public static class ApiPathUtilities
 
     private static readonly Regex SegmentExpression = new("^[a-z][A-Za-z0-9]*$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// Splits and validates an API path.
+    /// </summary>
     public static IReadOnlyList<string> SplitAndValidate(string apiPath)
     {
         BuilderValidation.ValidateApiPath(apiPath);
@@ -60,6 +84,9 @@ public static class ApiPathUtilities
 
     internal static bool IsValidSegment(string segment) => SegmentExpression.IsMatch(segment);
 
+    /// <summary>
+    /// Converts an API path to a PascalCase identifier.
+    /// </summary>
     public static string ToPascalCaseIdentifier(string apiPath)
     {
         var segments = SplitAndValidate(apiPath);
@@ -120,13 +147,22 @@ internal static class BuilderValidation
     }
 }
 
+/// <summary>
+/// Exception thrown when automatic schema generation cannot represent a CLR type.
+/// </summary>
 public sealed class UnsupportedSchemaTypeException : Exception
 {
+    /// <summary>
+    /// Creates a new unsupported schema type exception.
+    /// </summary>
     public UnsupportedSchemaTypeException(Type type, string reason)
         : base($"Type '{type}' is not supported for automatic schema generation: {reason}")
     {
         Type = type;
     }
 
+    /// <summary>
+    /// Gets the unsupported type.
+    /// </summary>
     public Type Type { get; }
 }

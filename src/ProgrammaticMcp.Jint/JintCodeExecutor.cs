@@ -11,6 +11,9 @@ using Jint.Runtime;
 
 namespace ProgrammaticMcp.Jint;
 
+/// <summary>
+/// Executes generated programmatic code inside a constrained Jint runtime.
+/// </summary>
 public sealed class JintCodeExecutor : ICodeExecutor
 {
     private static readonly Regex EntrypointSegmentExpression =
@@ -21,6 +24,13 @@ public sealed class JintCodeExecutor : ICodeExecutor
     private readonly IArtifactStore _artifactStore;
     private readonly IApprovalStore _approvalStore;
 
+    /// <summary>
+    /// Creates a new executor instance.
+    /// </summary>
+    /// <param name="catalog">The capability catalog used to build the generated namespace.</param>
+    /// <param name="options">Optional runtime limits. When omitted, the default limits are used.</param>
+    /// <param name="artifactStore">Optional artifact store used for spill and handler-created artifacts.</param>
+    /// <param name="approvalStore">Optional approval store used for mutation previews and state transitions.</param>
     public JintCodeExecutor(
         ICapabilityCatalog catalog,
         JintExecutorOptions? options = null,
@@ -34,6 +44,12 @@ public sealed class JintCodeExecutor : ICodeExecutor
         _approvalStore = approvalStore ?? new InMemoryApprovalStore();
     }
 
+    /// <summary>
+    /// Executes the supplied code against the generated programmatic namespace.
+    /// </summary>
+    /// <param name="request">The execution request to run.</param>
+    /// <param name="cancellationToken">The cancellation token that stops execution.</param>
+    /// <returns>A structured execution result containing the returned value, diagnostics, and artifacts.</returns>
     public async ValueTask<CodeExecutionResult> ExecuteAsync(CodeExecutionRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -273,10 +289,10 @@ public sealed class JintCodeExecutor : ICodeExecutor
             ProgrammaticContractConstants.SchemaVersion,
             _catalog.CapabilityVersion,
             result,
-            console,
-            diagnostics,
-            artifacts,
-            approvalsRequested,
+            console.ToArray(),
+            diagnostics.ToArray(),
+            artifacts.ToArray(),
+            approvalsRequested.ToArray(),
             resultArtifactId,
             effectiveVisibleApiPaths,
             new ExecutionStats(
@@ -583,7 +599,7 @@ public sealed class JintCodeExecutor : ICodeExecutor
             return;
         }
 
-        if (exception is OperationCanceledException)
+        if (exception is OperationCanceledException or ExecutionCanceledException)
         {
             if (!requestCancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
             {
@@ -1459,8 +1475,16 @@ public sealed class JintCodeExecutor : ICodeExecutor
     }
 }
 
+/// <summary>
+/// Represents a lookup failure for a capability path exposed to generated code.
+/// </summary>
 public sealed class UnknownCapabilityException : Exception
 {
+    /// <summary>
+    /// Creates a new unknown-capability exception.
+    /// </summary>
+    /// <param name="apiPath">The unresolved capability path.</param>
+    /// <param name="suggestions">Optional visible-path suggestions for the caller.</param>
     public UnknownCapabilityException(string apiPath, IReadOnlyList<string>? suggestions = null)
         : base($"Unknown capability '{apiPath}'.")
     {
@@ -1468,7 +1492,9 @@ public sealed class UnknownCapabilityException : Exception
         Suggestions = suggestions ?? Array.Empty<string>();
     }
 
+    /// <summary>Gets the unresolved capability path.</summary>
     public string ApiPath { get; }
 
+    /// <summary>Gets suggested visible capability paths, if any.</summary>
     public IReadOnlyList<string> Suggestions { get; }
 }

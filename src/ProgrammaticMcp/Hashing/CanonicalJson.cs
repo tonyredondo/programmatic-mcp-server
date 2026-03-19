@@ -8,8 +8,14 @@ using System.Text.Json.Serialization;
 
 namespace ProgrammaticMcp;
 
+/// <summary>
+/// Canonical JSON helpers used for stable hashing.
+/// </summary>
 public static class CanonicalJson
 {
+    /// <summary>
+    /// Serializes a JSON node into canonical JSON text.
+    /// </summary>
     public static string Serialize(JsonNode? node)
     {
         return node switch
@@ -22,6 +28,9 @@ public static class CanonicalJson
         };
     }
 
+    /// <summary>
+    /// Computes the canonical SHA-256 hash of a JSON node.
+    /// </summary>
     public static string Sha256(JsonNode? node)
     {
         var canonical = Serialize(node);
@@ -55,6 +64,9 @@ public static class CanonicalJson
         return NormalizeNumber(raw);
     }
 
+    /// <summary>
+    /// Normalizes a numeric literal into canonical JSON form.
+    /// </summary>
     public static string NormalizeNumber(string raw)
     {
         if (BigInteger.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var integer))
@@ -114,8 +126,14 @@ public static class CanonicalJson
     }
 }
 
+/// <summary>
+/// Calculates capability and approval hashes from canonical payloads.
+/// </summary>
 public static class CapabilityVersionCalculator
 {
+    /// <summary>
+    /// Calculates the capability version hash for a catalog snapshot.
+    /// </summary>
     public static string Calculate(IReadOnlyList<CapabilityDefinition> capabilities, string generatedTypeScript)
     {
         var payload = new JsonObject
@@ -128,6 +146,9 @@ public static class CapabilityVersionCalculator
         return CanonicalJson.Sha256(payload);
     }
 
+    /// <summary>
+    /// Calculates the canonical hash for mutation arguments.
+    /// </summary>
     public static string CalculateArgsHash(JsonObject args)
     {
         return CanonicalJson.Sha256(args);
@@ -165,6 +186,9 @@ public static class CapabilityVersionCalculator
     }
 }
 
+/// <summary>
+/// Internal JSON serializer contract used for stable round-tripping.
+/// </summary>
 internal static class JsonSerializerContract
 {
     private static readonly JsonSerializerOptions Options = new()

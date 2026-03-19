@@ -28,3 +28,9 @@ jobs:
 
       - name: Test
         run: dotnet test ProgrammaticMcp.sln --configuration Release --no-build --verbosity normal
+
+      - name: Pack libraries
+        run: |
+          dotnet pack src/ProgrammaticMcp/ProgrammaticMcp.csproj --configuration Release --no-build
+          dotnet pack src/ProgrammaticMcp.Jint/ProgrammaticMcp.Jint.csproj --configuration Release --no-build
+          dotnet pack src/ProgrammaticMcp.AspNetCore/ProgrammaticMcp.AspNetCore.csproj --configuration Release --no-build

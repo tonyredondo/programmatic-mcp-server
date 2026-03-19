@@ -19,7 +19,7 @@ A programmatic MCP server gives an agent a workflow like this:
 
 In this model, MCP is still the integration protocol, but the main user experience is code-first rather than tool-call-first.
 
-## Planned V0 Shape
+## Current V0 Shape
 
 The current v0 direction is:
 
@@ -41,11 +41,11 @@ The plan is for customers to get the main pieces already wired together:
 - caller binding for HTTP clients
 - ASP.NET Core integration on top of the C# MCP SDK
 
-## Planned Package Layout
+## Package Layout
 
 The implementation plan is organized around three library packages and one sample:
 
-- `ProgrammaticMcp.Core`
+- `ProgrammaticMcp`
   Core abstractions, capability metadata, schema generation, hashing, approvals, artifacts, and shared contracts.
 - `ProgrammaticMcp.Jint`
   The Jint-backed execution runtime, generated namespace bootstrap, bridge logic, and runtime diagnostics.

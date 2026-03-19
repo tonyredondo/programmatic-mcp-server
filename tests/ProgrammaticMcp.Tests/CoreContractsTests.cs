@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -148,6 +149,20 @@ public sealed class CoreContractsTests
     }
 
     [Fact]
+    public void GeneratedTypeScriptAndCapabilityVersionMatchGoldenOutputs()
+    {
+        var catalog = CreateDeterministicCatalog("Lists projects.");
+        var expectedDeclarations = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Golden", "DeterministicCatalog.d.ts"));
+        var expectedCapabilityVersion = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Golden", "DeterministicCatalog.capability-version.txt")).Trim();
+        var expectedArgsHash = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Golden", "DeterministicCatalog.args-hash.txt")).Trim();
+        var args = JsonNode.Parse("""{"taskId":"task-1"}""")!.AsObject();
+
+        Assert.Equal(expectedDeclarations.ReplaceLineEndings("\n"), catalog.GeneratedTypeScript.ReplaceLineEndings("\n"));
+        Assert.Equal(expectedCapabilityVersion, catalog.CapabilityVersion);
+        Assert.Equal(expectedArgsHash, CapabilityVersionCalculator.CalculateArgsHash(args));
+    }
+
+    [Fact]
     public void SharedExecutionAndEnvelopeContractsReflectPlannedWireShapes()
     {
         var preview = CreateApproval().PreviewEnvelope;
@@ -205,6 +220,76 @@ public sealed class CoreContractsTests
         Assert.Equal(22, approval.ApprovalNonce.Length);
         Assert.Matches("^[A-Za-z0-9_-]+$", approval.ApprovalNonce);
         Assert.True(Guid.TryParse(approval.ApprovalId, out _));
+    }
+
+    [Fact]
+    public async Task ArtifactStoreEnforcesQuotasAndSweepsExpiredEntriesUnderLoad()
+    {
+        var options = new ArtifactRetentionOptions(
+            ArtifactTtlSeconds: 60,
+            MaxArtifactBytesPerArtifact: 16,
+            MaxArtifactsPerConversation: 3,
+            MaxArtifactBytesPerConversation: 23,
+            MaxArtifactBytesGlobal: 32,
+            ArtifactChunkBytes: 4);
+        var store = new InMemoryArtifactStore(options);
+
+        await store.WriteAsync(new ArtifactWriteRequest("artifact-1", "conv-1", "caller-1", "execution.result", "a.txt", "text/plain", "12345678", DateTimeOffset.UtcNow.AddMinutes(1)));
+        await store.WriteAsync(new ArtifactWriteRequest("artifact-2", "conv-1", "caller-1", "execution.result", "b.txt", "text/plain", "abcdefgh", DateTimeOffset.UtcNow.AddMinutes(1)));
+
+        var perConversation = await Assert.ThrowsAsync<InvalidOperationException>(() => store.WriteAsync(
+            new ArtifactWriteRequest("artifact-3", "conv-1", "caller-1", "execution.result", "c.txt", "text/plain", "ABCDEFGHI", DateTimeOffset.UtcNow.AddMinutes(1))).AsTask());
+        Assert.Contains("artifact byte limit", perConversation.Message, StringComparison.OrdinalIgnoreCase);
+
+        await store.WriteAsync(new ArtifactWriteRequest("artifact-4", "conv-2", "caller-2", "execution.result", "d.txt", "text/plain", "ijklmnop", DateTimeOffset.UtcNow.AddMinutes(1)));
+        var global = await Assert.ThrowsAsync<InvalidOperationException>(() => store.WriteAsync(
+            new ArtifactWriteRequest("artifact-5", "conv-3", "caller-3", "execution.result", "e.txt", "text/plain", "QRSTUVWXY", DateTimeOffset.UtcNow.AddMinutes(1))).AsTask());
+        Assert.Contains("global byte limit", global.Message, StringComparison.OrdinalIgnoreCase);
+
+        await store.WriteAsync(new ArtifactWriteRequest("artifact-expired", "conv-expired", "caller-expired", "execution.result", "expired.txt", "text/plain", "gone", DateTimeOffset.UtcNow.AddSeconds(-1)));
+        await store.SweepExpiredAsync();
+
+        var expired = await store.ReadAsync(new ArtifactReadRequest("artifact-expired", "conv-expired", "caller-expired"));
+        Assert.False(expired.Found);
+    }
+
+    [Fact]
+    public async Task ApprovalStoreRecoversStaleApplyingEntriesAndSweepsExpiredOnes()
+    {
+        var store = new InMemoryApprovalStore();
+        var stale = CreateApproval() with
+        {
+            ApprovalId = "00000000-0000-0000-0000-000000000001",
+            State = ApprovalState.Applying,
+            ApplyingSinceUtc = DateTimeOffset.UtcNow.AddMinutes(-5)
+        };
+        var expired = CreateApproval() with
+        {
+            ApprovalId = "00000000-0000-0000-0000-000000000002",
+            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1)
+        };
+
+        await store.CreateAsync(stale);
+        await store.CreateAsync(expired);
+
+        var recovered = await store.RecoverStaleApplyingAsync(
+            TimeSpan.FromSeconds(30),
+            approval => approval with
+            {
+                State = ApprovalState.FailedTerminal,
+                ApplyingSinceUtc = null,
+                FailureCode = "apply_outcome_unknown"
+            });
+
+        Assert.Equal(1, recovered);
+
+        var recoveredApproval = await store.GetAsync(stale.ApprovalId);
+        Assert.NotNull(recoveredApproval);
+        Assert.Equal(ApprovalState.FailedTerminal, recoveredApproval!.State);
+        Assert.Equal("apply_outcome_unknown", recoveredApproval.FailureCode);
+
+        await store.SweepExpiredAsync();
+        Assert.Null(await store.GetAsync(expired.ApprovalId));
     }
 
     [Fact]

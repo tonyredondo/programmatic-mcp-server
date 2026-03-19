@@ -4,15 +4,25 @@ using System.Text.RegularExpressions;
 
 namespace ProgrammaticMcp.Jint.Spike;
 
+/// <summary>
+/// Runs small proof-of-concept scripts against the Jint runtime to validate executor behavior.
+/// </summary>
 public sealed class RuntimeProofHarness
 {
     private readonly IReadOnlyDictionary<string, Func<object?, CancellationToken, Task<object?>>> _handlers;
 
+    /// <summary>
+    /// Creates a new proof harness that forwards host calls to the provided handler map.
+    /// </summary>
+    /// <param name="handlers">The host-call handlers exposed to the proof script.</param>
     public RuntimeProofHarness(IReadOnlyDictionary<string, Func<object?, CancellationToken, Task<object?>>> handlers)
     {
         _handlers = handlers;
     }
 
+    /// <summary>
+    /// Evaluates a script and returns the result or the structured failure captured by the harness.
+    /// </summary>
     public async Task<RuntimeProofResult> EvaluateAsync(string script, CancellationToken cancellationToken = default)
     {
         var bridge = new SerializedHostBridge(_handlers);
@@ -29,6 +39,9 @@ public sealed class RuntimeProofHarness
         }
     }
 
+    /// <summary>
+    /// Executes a script, invokes the named function, and returns the settled result or structured failure.
+    /// </summary>
     public async Task<RuntimeProofResult> ExecuteAndInvokeAsync(
         string script,
         string functionName,
@@ -51,6 +64,7 @@ public sealed class RuntimeProofHarness
         }
     }
 
+    /// <summary>Creates the configured Jint engine used by the proof harness.</summary>
     private static Engine CreateEngine(SerializedHostBridge bridge, CancellationToken cancellationToken)
     {
         var engine = new Engine(
@@ -70,6 +84,7 @@ public sealed class RuntimeProofHarness
         return engine;
     }
 
+    /// <summary>Builds a successful harness result.</summary>
     private static RuntimeProofResult Succeed(object? value, int maxObservedHostConcurrency)
     {
         return new RuntimeProofResult(
@@ -82,6 +97,7 @@ public sealed class RuntimeProofHarness
             MaxObservedHostConcurrency: maxObservedHostConcurrency);
     }
 
+    /// <summary>Builds a structured failure result from an exception.</summary>
     private static RuntimeProofResult Fail(Exception exception, int maxObservedHostConcurrency)
     {
         if (TryGetSyntaxErrorLocation(exception, out var line, out var column, out var description))
@@ -130,6 +146,7 @@ public sealed class RuntimeProofHarness
             MaxObservedHostConcurrency: maxObservedHostConcurrency);
     }
 
+    /// <summary>Attempts to extract an unknown-capability path from the supplied exception.</summary>
     private static bool TryGetUnknownCapabilityPath(Exception exception, out string? path)
     {
         if (exception is UnknownCapabilityException unknownCapabilityException)
@@ -162,6 +179,7 @@ public sealed class RuntimeProofHarness
         return false;
     }
 
+    /// <summary>Attempts to extract source-location details from a syntax error.</summary>
     private static bool TryGetSyntaxErrorLocation(
         Exception exception,
         out int? line,
@@ -199,6 +217,7 @@ public sealed class RuntimeProofHarness
         return false;
     }
 
+    /// <summary>Reads an optional integer property from an exception instance.</summary>
     private static int? ReadNullableInt(Exception exception, string propertyName)
     {
         var value = exception.GetType().GetProperty(propertyName)?.GetValue(exception);
@@ -210,6 +229,7 @@ public sealed class RuntimeProofHarness
         };
     }
 
+    /// <summary>Formats an exception and its inner exceptions into a single diagnostic string.</summary>
     private static string DescribeException(Exception exception)
     {
         return exception.InnerException is null
@@ -217,6 +237,9 @@ public sealed class RuntimeProofHarness
             : $"{exception.GetType().FullName}: {exception.Message} --> {DescribeException(exception.InnerException)}";
     }
 
+    /// <summary>
+    /// Serializes host calls so the proof harness can measure concurrency behavior deterministically.
+    /// </summary>
     private sealed class SerializedHostBridge
     {
         private readonly IReadOnlyDictionary<string, Func<object?, CancellationToken, Task<object?>>> _handlers;
@@ -224,13 +247,16 @@ public sealed class RuntimeProofHarness
         private int _activeCalls;
         private int _maxObservedConcurrency;
 
+        /// <summary>Creates a serialized host bridge over the supplied capability handlers.</summary>
         public SerializedHostBridge(IReadOnlyDictionary<string, Func<object?, CancellationToken, Task<object?>>> handlers)
         {
             _handlers = handlers;
         }
 
+        /// <summary>Gets the highest number of concurrent host calls observed during execution.</summary>
         public int MaxObservedConcurrency => _maxObservedConcurrency;
 
+        /// <summary>Invokes a host handler while enforcing serialized access.</summary>
         public async Task<object?> InvokeAsync(string path, object? argument, CancellationToken cancellationToken)
         {
             if (!_handlers.TryGetValue(path, out var handler))

@@ -1,6 +1,6 @@
 # Security
 
-This document is the Phase 2 draft for the v0 security model.
+This document describes the current v0 security model.
 
 ## Built-In Runtime Boundary
 
@@ -15,6 +15,13 @@ The library distinguishes between:
 
 Mutation flows require both stable caller binding and an explicit authorization decision.
 
+In the ASP.NET Core integration, caller binding can come from:
+
+- the authenticated principal when the host maps one
+- MCP session identity when the transport exposes one
+- the built-in signed cookie fallback
+- the built-in signed-header fallback when the host provisions a stable token out of band
+
 ## Mutation Safety Model
 
 - sandbox code does not apply mutations directly
@@ -28,8 +35,11 @@ Mutation flows require both stable caller binding and an explicit authorization 
 - schemas are generated from one fixed serializer contract
 - generated TypeScript and `capabilityVersion` are based on the same registration data
 - canonical hashing is used for approval args and capability-version computation
-- the core contracts require runtime validation of inputs and protocol-visible result payloads, and later runtime/transport phases are responsible for enforcing that rule
+- runtime and transport layers validate inputs, protocol-visible payloads, cursor state, and approval transitions before they are exposed over MCP
 
-## Current Phase Boundary
+## HTTP Transport Notes
 
-This is a Phase 2 draft. Transport-specific concerns such as cookies, signed headers, same-origin checks, and reconnect behavior are implemented later in the ASP.NET Core integration phase.
+- the built-in cookie fallback is route-scoped, `HttpOnly`, and `SameSite=Lax`
+- same-origin checks are enforced when cookie-based caller binding is used on mutation-related flows
+- the built-in signed-header fallback is intended for clients that cannot preserve cookies but can hold a host-provisioned stable token
+- CORS policy remains host-owned

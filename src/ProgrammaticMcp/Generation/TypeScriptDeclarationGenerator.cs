@@ -3,8 +3,14 @@ using System.Text.Json.Nodes;
 
 namespace ProgrammaticMcp;
 
+/// <summary>
+/// Generates TypeScript declarations from the registered capability catalog.
+/// </summary>
 public static class TypeScriptDeclarationGenerator
 {
+    /// <summary>
+    /// Generates the declaration payload for the supplied capabilities.
+    /// </summary>
     public static string Generate(IReadOnlyList<CapabilityDefinition> capabilities)
     {
         var builder = new StringBuilder();

@@ -2,6 +2,18 @@
   <PropertyGroup>
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <Description>Jint-backed runtime support for ProgrammaticMcp.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PackageId>ProgrammaticMcp.Jint</PackageId>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Version>0.1.0-preview.1</Version>
+    <Authors>ProgrammaticMcp contributors</Authors>
+    <Company>ProgrammaticMcp contributors</Company>
+    <PackageTags>mcp;modelcontextprotocol;ai;agents;javascript;jint;aspnetcore</PackageTags>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <RepositoryType>git</RepositoryType>
+    <PackageOutputPath>..\..\artifacts\packages</PackageOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
@@ -10,5 +22,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\ProgrammaticMcp\ProgrammaticMcp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\docs\packages\ProgrammaticMcp.Jint.md" Pack="true" PackagePath="README.md" />
   </ItemGroup>
 </Project>

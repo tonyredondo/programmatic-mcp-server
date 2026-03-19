@@ -3,12 +3,18 @@ using System.Text.Json.Nodes;
 
 namespace ProgrammaticMcp;
 
+/// <summary>
+/// Entry point for registering capabilities and mutations.
+/// </summary>
 public sealed class ProgrammaticMcpBuilder
 {
     private readonly List<ICapabilityRegistration> _registrations = new();
     private IProgrammaticAuthorizationPolicy? _authorizationPolicy;
     private bool _allowAllBoundCallers;
 
+    /// <summary>
+    /// Registers a capability with the supplied API path.
+    /// </summary>
     public ProgrammaticMcpBuilder AddCapability<TInput, TResult>(string apiPath, Action<CapabilityBuilder<TInput, TResult>> configure)
     {
         var builder = new CapabilityBuilder<TInput, TResult>(apiPath);
@@ -17,6 +23,9 @@ public sealed class ProgrammaticMcpBuilder
         return this;
     }
 
+    /// <summary>
+    /// Registers a mutation with the supplied API path.
+    /// </summary>
     public ProgrammaticMcpBuilder AddMutation<TArgs, TPreview, TApplyResult>(string apiPath, Action<MutationBuilder<TArgs, TPreview, TApplyResult>> configure)
     {
         var builder = new MutationBuilder<TArgs, TPreview, TApplyResult>(apiPath);
@@ -25,18 +34,27 @@ public sealed class ProgrammaticMcpBuilder
         return this;
     }
 
+    /// <summary>
+    /// Uses the supplied authorization policy for mutations.
+    /// </summary>
     public ProgrammaticMcpBuilder UseAuthorizationPolicy(IProgrammaticAuthorizationPolicy policy)
     {
         _authorizationPolicy = policy ?? throw new ArgumentNullException(nameof(policy));
         return this;
     }
 
+    /// <summary>
+    /// Allows all callers that have a stable caller binding.
+    /// </summary>
     public ProgrammaticMcpBuilder AllowAllBoundCallers()
     {
         _allowAllBoundCallers = true;
         return this;
     }
 
+    /// <summary>
+    /// Builds the immutable catalog snapshot from the registered capabilities.
+    /// </summary>
     public ProgrammaticCatalogSnapshot BuildCatalog()
     {
         if (_registrations.OfType<IMutationRegistration>().Any() && _authorizationPolicy is null && !_allowAllBoundCallers)
@@ -58,6 +76,9 @@ public sealed class ProgrammaticMcpBuilder
     }
 }
 
+/// <summary>
+/// Builder for a non-mutating capability.
+/// </summary>
 public sealed class CapabilityBuilder<TInput, TResult> : ICapabilityRegistration
 {
     private readonly string _apiPath;
@@ -70,41 +91,62 @@ public sealed class CapabilityBuilder<TInput, TResult> : ICapabilityRegistration
     private JsonNode? _inputSchemaOverride;
     private JsonNode? _resultSchemaOverride;
 
+    /// <summary>
+    /// Creates a capability builder for the specified API path.
+    /// </summary>
     internal CapabilityBuilder(string apiPath)
     {
         _apiPath = apiPath;
     }
 
+    /// <summary>
+    /// Sets the human-readable description.
+    /// </summary>
     public CapabilityBuilder<TInput, TResult> WithDescription(string description)
     {
         _description = description;
         return this;
     }
 
+    /// <summary>
+    /// Adds a usage hint describing when the capability should be used.
+    /// </summary>
     public CapabilityBuilder<TInput, TResult> UseWhen(string useWhen)
     {
         _useWhen.Add(useWhen);
         return this;
     }
 
+    /// <summary>
+    /// Adds a usage hint describing when the capability should not be used.
+    /// </summary>
     public CapabilityBuilder<TInput, TResult> DoNotUseWhen(string doNotUseWhen)
     {
         _doNotUseWhen.Add(doNotUseWhen);
         return this;
     }
 
+    /// <summary>
+    /// Adds a free-form usage note.
+    /// </summary>
     public CapabilityBuilder<TInput, TResult> AddGuidanceNote(string note)
     {
         _notes.Add(note);
         return this;
     }
 
+    /// <summary>
+    /// Sets the capability handler.
+    /// </summary>
     public CapabilityBuilder<TInput, TResult> WithHandler(Func<TInput, ProgrammaticCapabilityContext, ValueTask<TResult>> handler)
     {
         _handler = handler;
         return this;
     }
 
+    /// <summary>
+    /// Adds an example input and result pair.
+    /// </summary>
     public CapabilityBuilder<TInput, TResult> AddExample(string description, TInput input, TResult result)
     {
         _examples.Add(
@@ -115,18 +157,25 @@ public sealed class CapabilityBuilder<TInput, TResult> : ICapabilityRegistration
         return this;
     }
 
+    /// <summary>
+    /// Overrides the generated input schema.
+    /// </summary>
     public CapabilityBuilder<TInput, TResult> WithInputSchemaOverride(JsonNode schema)
     {
         _inputSchemaOverride = schema.DeepClone();
         return this;
     }
 
+    /// <summary>
+    /// Overrides the generated result schema.
+    /// </summary>
     public CapabilityBuilder<TInput, TResult> WithResultSchemaOverride(JsonNode schema)
     {
         _resultSchemaOverride = schema.DeepClone();
         return this;
     }
 
+    /// <inheritdoc />
     CapabilityDefinition ICapabilityRegistration.BuildDefinition(BuiltInSchemaGenerator schemaGenerator)
     {
         var inputSchema = _inputSchemaOverride ?? schemaGenerator.Generate(typeof(TInput));
@@ -160,6 +209,9 @@ public sealed class CapabilityBuilder<TInput, TResult> : ICapabilityRegistration
     }
 }
 
+/// <summary>
+/// Builder for a mutation capability.
+/// </summary>
 public sealed class MutationBuilder<TArgs, TPreview, TApplyResult> : ICapabilityRegistration, IMutationRegistration
 {
     private readonly string _apiPath;
@@ -174,47 +226,71 @@ public sealed class MutationBuilder<TArgs, TPreview, TApplyResult> : ICapability
     private JsonNode? _previewSchemaOverride;
     private JsonNode? _applyResultSchemaOverride;
 
+    /// <summary>
+    /// Creates a mutation builder for the specified API path.
+    /// </summary>
     internal MutationBuilder(string apiPath)
     {
         _apiPath = apiPath;
     }
 
+    /// <summary>
+    /// Sets the human-readable description.
+    /// </summary>
     public MutationBuilder<TArgs, TPreview, TApplyResult> WithDescription(string description)
     {
         _description = description;
         return this;
     }
 
+    /// <summary>
+    /// Adds a usage hint describing when the mutation should be used.
+    /// </summary>
     public MutationBuilder<TArgs, TPreview, TApplyResult> UseWhen(string useWhen)
     {
         _useWhen.Add(useWhen);
         return this;
     }
 
+    /// <summary>
+    /// Adds a usage hint describing when the mutation should not be used.
+    /// </summary>
     public MutationBuilder<TArgs, TPreview, TApplyResult> DoNotUseWhen(string doNotUseWhen)
     {
         _doNotUseWhen.Add(doNotUseWhen);
         return this;
     }
 
+    /// <summary>
+    /// Adds a free-form usage note.
+    /// </summary>
     public MutationBuilder<TArgs, TPreview, TApplyResult> AddGuidanceNote(string note)
     {
         _notes.Add(note);
         return this;
     }
 
+    /// <summary>
+    /// Sets the preview handler.
+    /// </summary>
     public MutationBuilder<TArgs, TPreview, TApplyResult> WithPreviewHandler(Func<TArgs, ProgrammaticMutationContext, ValueTask<TPreview>> handler)
     {
         _previewHandler = handler;
         return this;
     }
 
+    /// <summary>
+    /// Sets the summary factory used for approval previews.
+    /// </summary>
     public MutationBuilder<TArgs, TPreview, TApplyResult> WithSummaryFactory(Func<TArgs, TPreview, ProgrammaticMutationContext, ValueTask<string>> factory)
     {
         _summaryFactory = factory;
         return this;
     }
 
+    /// <summary>
+    /// Sets the apply handler.
+    /// </summary>
     public MutationBuilder<TArgs, TPreview, TApplyResult> WithApplyHandler(
         Func<TArgs, ProgrammaticMutationContext, ValueTask<MutationApplyResult<TApplyResult>>> handler)
     {
@@ -222,24 +298,34 @@ public sealed class MutationBuilder<TArgs, TPreview, TApplyResult> : ICapability
         return this;
     }
 
+    /// <summary>
+    /// Overrides the generated args schema.
+    /// </summary>
     public MutationBuilder<TArgs, TPreview, TApplyResult> WithArgsSchemaOverride(JsonNode schema)
     {
         _argsSchemaOverride = schema.DeepClone();
         return this;
     }
 
+    /// <summary>
+    /// Overrides the generated preview schema.
+    /// </summary>
     public MutationBuilder<TArgs, TPreview, TApplyResult> WithPreviewSchemaOverride(JsonNode schema)
     {
         _previewSchemaOverride = schema.DeepClone();
         return this;
     }
 
+    /// <summary>
+    /// Overrides the generated apply-result schema.
+    /// </summary>
     public MutationBuilder<TArgs, TPreview, TApplyResult> WithApplyResultSchemaOverride(JsonNode schema)
     {
         _applyResultSchemaOverride = schema.DeepClone();
         return this;
     }
 
+    /// <inheritdoc />
     CapabilityDefinition ICapabilityRegistration.BuildDefinition(BuiltInSchemaGenerator schemaGenerator)
     {
         var argsSchema = _argsSchemaOverride ?? schemaGenerator.Generate(typeof(TArgs));
@@ -295,17 +381,29 @@ public sealed class MutationBuilder<TArgs, TPreview, TApplyResult> : ICapability
     }
 }
 
+/// <summary>
+/// Internal contract for capability registrations.
+/// </summary>
 internal interface ICapabilityRegistration
 {
     CapabilityDefinition BuildDefinition(BuiltInSchemaGenerator schemaGenerator);
 }
 
+/// <summary>
+/// Marker interface for mutation registrations.
+/// </summary>
 internal interface IMutationRegistration
 {
 }
 
+/// <summary>
+/// Formats signature strings for the generated catalog.
+/// </summary>
 internal static class SignatureFormatter
 {
+    /// <summary>
+    /// Formats a stable signature string for the supplied API path.
+    /// </summary>
     public static string Format(string apiPath)
     {
         var identifierBase = ApiPathUtilities.ToPascalCaseIdentifier(apiPath);
@@ -313,8 +411,14 @@ internal static class SignatureFormatter
     }
 }
 
+/// <summary>
+/// Creates the JSON schema for mutation preview envelopes.
+/// </summary>
 internal static class MutationEnvelopeSchemaFactory
 {
+    /// <summary>
+    /// Creates the JSON schema for the preview envelope emitted during mutation registration.
+    /// </summary>
     public static JsonNode CreatePreviewEnvelopeSchema(string apiPath, JsonNode argsSchema, JsonNode previewSchema)
     {
         return new JsonObject

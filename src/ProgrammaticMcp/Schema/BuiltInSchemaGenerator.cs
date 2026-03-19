@@ -6,10 +6,16 @@ using System.Text.Json.Serialization;
 
 namespace ProgrammaticMcp;
 
+/// <summary>
+/// Generates JSON Schema documents from CLR types.
+/// </summary>
 public sealed class BuiltInSchemaGenerator
 {
     private readonly NullabilityInfoContext _nullabilityInfoContext = new();
 
+    /// <summary>
+    /// Generates a JSON Schema document for the supplied type.
+    /// </summary>
     public JsonNode Generate(Type type)
     {
         var objectCounts = CountObjectReferences(type, new Dictionary<Type, int>());

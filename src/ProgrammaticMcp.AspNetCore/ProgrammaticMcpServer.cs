@@ -22,63 +22,95 @@ using global::ProgrammaticMcp.Jint;
 
 namespace ProgrammaticMcp.AspNetCore;
 
+/// <summary>
+/// Configures the ASP.NET Core MCP server integration.
+/// </summary>
 public sealed class ProgrammaticMcpServerOptions
 {
+    /// <summary>Gets the default cookie name used for caller binding.</summary>
     public const string DefaultCookieName = "__Host-programmatic-mcp-caller";
+    /// <summary>Gets the default signed-header name used for caller binding.</summary>
     public const string DefaultSignedHeaderName = "X-Programmatic-Mcp-Caller-Binding";
+    /// <summary>Gets the default path segment used by the generated TypeScript endpoint.</summary>
     public const string DefaultTypeEndpointSegment = "types";
+    /// <summary>Gets the HTTP header that carries the MCP session identifier.</summary>
     public const string McpSessionIdHeaderName = "Mcp-Session-Id";
 
+    /// <summary>Gets the catalog builder used to register capabilities before the server starts.</summary>
     public ProgrammaticMcpBuilder Builder { get; } = new();
 
+    /// <summary>Gets or sets the runtime options used by the Jint-backed executor.</summary>
     public JintExecutorOptions ExecutorOptions { get; set; } = new();
 
+    /// <summary>Gets or sets the server name advertised to MCP clients.</summary>
     public string ServerName { get; set; } = "ProgrammaticMcp.Server";
 
+    /// <summary>Gets or sets the server version advertised to MCP clients.</summary>
     public string ServerVersion { get; set; } = "0.1.0";
 
+    /// <summary>Gets or sets the default route prefix used when mapping the server.</summary>
     public string RoutePrefix { get; internal set; } = "/mcp";
 
+    /// <summary>Gets or sets the relative path segment used for the generated TypeScript endpoint.</summary>
     public string TypeEndpointSegment { get; set; } = DefaultTypeEndpointSegment;
 
+    /// <summary>Gets or sets whether cookie-based caller binding is enabled.</summary>
     public bool EnableCookieCallerBinding { get; set; } = true;
 
+    /// <summary>Gets or sets whether signed-header caller binding is enabled.</summary>
     public bool EnableSignedHeaderCallerBinding { get; set; }
 
+    /// <summary>Gets or sets the cookie name used for caller binding.</summary>
     public string CookieName { get; set; } = DefaultCookieName;
 
+    /// <summary>Gets or sets the signed-header name used for caller binding.</summary>
     public string SignedHeaderName { get; set; } = DefaultSignedHeaderName;
 
+    /// <summary>Gets or sets the cookie lifetime used for caller binding.</summary>
     public TimeSpan CookieLifetime { get; set; } = TimeSpan.FromDays(30);
 
+    /// <summary>Gets or sets the signed-header token lifetime used for caller binding.</summary>
     public TimeSpan HeaderLifetime { get; set; } = TimeSpan.FromHours(24);
 
+    /// <summary>Gets or sets whether insecure development cookies are allowed.</summary>
     public bool AllowInsecureDevelopmentCookies { get; set; }
 
+    /// <summary>Gets or sets the maximum number of concurrent executions allowed per caller.</summary>
     public int MaxConcurrentExecutionsPerCaller { get; set; } = 2;
 
+    /// <summary>Gets or sets the maximum number of execution requests allowed per caller per minute.</summary>
     public int MaxExecutionRequestsPerMinutePerCaller { get; set; } = 60;
 
+    /// <summary>Gets or sets the maximum length of capability search queries.</summary>
     public int MaxQueryLength { get; set; } = 500;
 
+    /// <summary>Gets or sets the maximum number of approval list snapshots kept per caller binding.</summary>
     public int MaxApprovalListSnapshotsPerCallerBinding { get; set; } = 8;
 
+    /// <summary>Gets or sets the lifetime, in seconds, of approval list snapshots.</summary>
     public int ApprovalListSnapshotTtlSeconds { get; set; } = 60;
 
+    /// <summary>Gets or sets the age threshold, in seconds, for recovering stale applying approvals.</summary>
     public int StaleApplyingTimeoutSeconds { get; set; } = 60;
 
+    /// <summary>Gets or sets whether inline compatibility text mirroring is enabled.</summary>
     public bool EnableCompatibilityTextMirroring { get; set; }
 
+    /// <summary>Gets or sets the maximum number of bytes mirrored into compatibility text.</summary>
     public int CompatibilityTextMirrorMaxBytes { get; set; } = 16_384;
 
+    /// <summary>Gets or sets the graceful shutdown timeout used when draining in-flight work.</summary>
     public TimeSpan GracefulShutdownTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>Invokes the catalog configuration callback.</summary>
+    /// <param name="configure">Configures the capabilities that will be exposed by the server.</param>
     public void ConfigureCatalog(Action<ProgrammaticMcpBuilder> configure)
     {
         ArgumentNullException.ThrowIfNull(configure);
         configure(Builder);
     }
 
+    /// <summary>Validates the configured server options.</summary>
     internal void Validate()
     {
         if (string.IsNullOrWhiteSpace(ServerName))
@@ -126,16 +158,27 @@ public sealed class ProgrammaticMcpServerOptions
             throw new InvalidOperationException("CompatibilityTextMirrorMaxBytes must be positive.");
         }
 
+        ExecutorOptions.Validate();
     }
 }
 
+/// <summary>
+/// Creates caller-binding tokens for the ASP.NET Core transport.
+/// </summary>
 public interface IProgrammaticCallerBindingTokenService
 {
+    /// <summary>Creates a signed header token for the specified caller binding identifier.</summary>
     string CreateSignedHeaderToken(string callerBindingId);
 }
 
+/// <summary>
+/// Registers Programmatic MCP services in the dependency injection container.
+/// </summary>
 public static class ProgrammaticMcpServiceCollectionExtensions
 {
+    /// <summary>Adds the Programmatic MCP server services to the container.</summary>
+    /// <param name="services">The service collection to populate.</param>
+    /// <param name="configure">Configures the server before registration.</param>
     public static IServiceCollection AddProgrammaticMcpServer(
         this IServiceCollection services,
         Action<ProgrammaticMcpServerOptions> configure)
@@ -223,8 +266,14 @@ public static class ProgrammaticMcpServiceCollectionExtensions
     }
 }
 
+/// <summary>
+/// Maps the Programmatic MCP endpoints into an ASP.NET Core endpoint route builder.
+/// </summary>
 public static class ProgrammaticMcpEndpointRouteBuilderExtensions
 {
+    /// <summary>Maps the MCP transport endpoint and the generated TypeScript endpoint.</summary>
+    /// <param name="endpoints">The route builder used to register endpoints.</param>
+    /// <param name="routePrefix">Optional override for the MCP route prefix.</param>
     public static IEndpointRouteBuilder MapProgrammaticMcpServer(this IEndpointRouteBuilder endpoints, string? routePrefix = null)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
@@ -819,6 +868,17 @@ internal sealed class ProgrammaticMcpLifecycleService(
 {
     public override async Task StartAsync(CancellationToken cancellationToken)
     {
+        var artifactLimit = options.ExecutorOptions.ArtifactRetention.MaxArtifactBytesGlobal;
+        var memoryBudget = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        var warningThreshold = CalculateArtifactWarningThreshold(memoryBudget);
+        if (artifactLimit > warningThreshold)
+        {
+            logger.LogWarning(
+                "Configured in-memory artifact limit {ArtifactLimitBytes} bytes exceeds the startup warning threshold of {WarningThresholdBytes} bytes. Consider lowering MaxArtifactBytesGlobal or using a non-memory artifact store for constrained hosts.",
+                artifactLimit,
+                warningThreshold);
+        }
+
         if (approvalStore is InMemoryApprovalStore inMemoryApprovalStore)
         {
             var recovered = await inMemoryApprovalStore.RecoverStaleApplyingAsync(
@@ -849,6 +909,17 @@ internal sealed class ProgrammaticMcpLifecycleService(
         shutdownCoordinator.BeginShutdown();
         await shutdownCoordinator.WaitForDrainAsync(options.GracefulShutdownTimeout, cancellationToken);
         await base.StopAsync(cancellationToken);
+    }
+
+    private static long CalculateArtifactWarningThreshold(long memoryBudgetBytes)
+    {
+        const long fallbackThresholdBytes = 1_073_741_824;
+        if (memoryBudgetBytes <= 0)
+        {
+            return fallbackThresholdBytes;
+        }
+
+        return Math.Min(memoryBudgetBytes / 4, fallbackThresholdBytes);
     }
 }
 
