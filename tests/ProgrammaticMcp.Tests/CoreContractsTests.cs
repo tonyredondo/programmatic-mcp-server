@@ -1,0 +1,315 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
+namespace ProgrammaticMcp.Tests;
+
+public sealed class CoreContractsTests
+{
+    [Fact]
+    public void BuilderRegistrationProducesStableOrderedCatalogSearch()
+    {
+        var builder = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddCapability<ListProjectsInput, ListProjectsResult>(
+                "projects.list",
+                capability => capability
+                    .WithDescription("Lists projects.")
+                    .UseWhen("You need to inspect projects.")
+                    .DoNotUseWhen("You need to mutate data.")
+                    .WithHandler((_, _) => ValueTask.FromResult(new ListProjectsResult(Array.Empty<string>()))))
+            .AddCapability<GetProjectInput, GetProjectResult>(
+                "projects.getById",
+                capability => capability
+                    .WithDescription("Gets a project by id.")
+                    .UseWhen("You need one project.")
+                    .DoNotUseWhen("You need a list.")
+                    .WithHandler((input, _) => ValueTask.FromResult(new GetProjectResult(input.ProjectId, "example"))))
+            .AddMutation<CompleteTaskArgs, CompleteTaskPreview, CompleteTaskApplyResult>(
+                "tasks.complete",
+                mutation => mutation
+                    .WithDescription("Completes a task.")
+                    .UseWhen("You are sure the task should be completed.")
+                    .DoNotUseWhen("You are only exploring.")
+                    .WithPreviewHandler((args, _) => ValueTask.FromResult(new CompleteTaskPreview(args.TaskId, true)))
+                    .WithSummaryFactory((args, _, _) => ValueTask.FromResult($"Complete {args.TaskId}"))
+                    .WithApplyHandler((args, _) => ValueTask.FromResult(MutationApplyResult<CompleteTaskApplyResult>.Success(new CompleteTaskApplyResult(args.TaskId, "done")))));
+
+        var catalog = builder.BuildCatalog();
+        var page1 = catalog.Search(new CapabilitySearchRequest(DetailLevel: CapabilityDetailLevel.Names, Limit: 2));
+        var page2 = catalog.Search(new CapabilitySearchRequest(DetailLevel: CapabilityDetailLevel.Full, Limit: 2, Cursor: page1.NextCursor));
+
+        Assert.Equal(new[] { "projects.getById", "projects.list" }, page1.Items.Select(item => item.ApiPath));
+        Assert.Equal("tasks.complete", Assert.Single(page2.Items).ApiPath);
+        Assert.Equal(CapabilityDetailLevel.Names, page1.DetailLevel);
+        Assert.Equal(CapabilityDetailLevel.Full, page2.DetailLevel);
+        Assert.NotNull(page1.NextCursor);
+        Assert.Null(page2.NextCursor);
+        Assert.All(page1.Items, item =>
+        {
+            Assert.Null(item.Signature);
+            Assert.Null(item.Description);
+            Assert.Null(item.ResultSchema);
+            Assert.Null(item.Guidance);
+        });
+        Assert.NotNull(page2.Items[0].InputSchema);
+        Assert.NotNull(page2.Items[0].ResultSchema);
+        Assert.NotNull(page2.Items[0].PreviewPayloadSchema);
+        Assert.NotNull(page2.Items[0].ApplyResultSchema);
+        Assert.Contains("You are sure the task should be completed.", page2.Items[0].Guidance!.UseWhen);
+    }
+
+    [Fact]
+    public void DangerousApiPathSegmentsAreRejected()
+    {
+        var builder = new ProgrammaticMcpBuilder();
+
+        builder.AddCapability<ListProjectsInput, ListProjectsResult>(
+            "projects.__proto__",
+            capability => capability
+                .WithDescription("bad")
+                .UseWhen("never")
+                .DoNotUseWhen("always")
+                .WithHandler((_, _) => ValueTask.FromResult(new ListProjectsResult(Array.Empty<string>()))));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => builder.BuildCatalog());
+        Assert.Contains("__proto__", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MutationsRequireExplicitAuthorizationChoice()
+    {
+        var builder = new ProgrammaticMcpBuilder();
+        builder.AddMutation<CompleteTaskArgs, CompleteTaskPreview, CompleteTaskApplyResult>(
+            "tasks.complete",
+            mutation => mutation
+                .WithDescription("Completes a task.")
+                .UseWhen("You are sure the task should be completed.")
+                .DoNotUseWhen("You are only exploring.")
+                .WithPreviewHandler((args, _) => ValueTask.FromResult(new CompleteTaskPreview(args.TaskId, true)))
+                .WithSummaryFactory((args, _, _) => ValueTask.FromResult($"Complete {args.TaskId}"))
+                .WithApplyHandler((args, _) => ValueTask.FromResult(MutationApplyResult<CompleteTaskApplyResult>.Success(new CompleteTaskApplyResult(args.TaskId, "done")))));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => builder.BuildCatalog());
+        Assert.Contains("authorization", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SchemaGenerationIsDeterministicAndUsesJsonSchema202012()
+    {
+        var generator = new BuiltInSchemaGenerator();
+
+        var schema1 = generator.Generate(typeof(SchemaFixture));
+        var schema2 = generator.Generate(typeof(SchemaFixture));
+
+        Assert.Equal(ProgrammaticContractConstants.JsonSchemaDialect, schema1["$schema"]?.GetValue<string>());
+        Assert.Equal(CanonicalJson.Serialize(schema1), CanonicalJson.Serialize(schema2));
+        Assert.Equal("date-time", schema1["properties"]?["createdAt"]?["format"]?.GetValue<string>());
+        Assert.Equal("uuid", schema1["properties"]?["id"]?["format"]?.GetValue<string>());
+        Assert.Equal("date", schema1["properties"]?["dueDate"]?["format"]?.GetValue<string>());
+        Assert.Equal("time", schema1["properties"]?["cutoff"]?["format"]?.GetValue<string>());
+        Assert.Equal("c", schema1["properties"]?["duration"]?["x-dotnet-format"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public void UnsupportedAutomaticSchemaCasesRequireOverride()
+    {
+        var generator = new BuiltInSchemaGenerator();
+
+        Assert.Throws<UnsupportedSchemaTypeException>(() => generator.Generate(typeof(UnsupportedFixture)));
+    }
+
+    [Fact]
+    public void RuntimeValidationRejectsInvalidPayloads()
+    {
+        var generator = new BuiltInSchemaGenerator();
+        var schema = generator.Generate(typeof(ListProjectsInput));
+
+        var valid = JsonNode.Parse("""{"includeArchived":true}""");
+        JsonSchemaValidator.Validate(valid, schema);
+
+        var invalid = JsonNode.Parse("""{"includeArchived":"yes"}""");
+        var exception = Assert.Throws<JsonSchemaValidationException>(() => JsonSchemaValidator.Validate(invalid, schema));
+        Assert.Contains("boolean", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GeneratedTypeScriptAndCapabilityVersionAreDeterministic()
+    {
+        var first = CreateDeterministicCatalog("Lists projects.");
+        var second = CreateDeterministicCatalog("Lists projects.");
+        var changed = CreateDeterministicCatalog("Lists all projects.");
+
+        Assert.Equal(first.GeneratedTypeScript, second.GeneratedTypeScript);
+        Assert.Equal(first.CapabilityVersion, second.CapabilityVersion);
+        Assert.NotEqual(first.CapabilityVersion, changed.CapabilityVersion);
+        Assert.Contains("type ProjectsListInput =", first.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Contains("type TasksCompleteApplyResult =", first.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Contains("projects.list(input: ProjectsListInput) -> Promise<ProjectsListResult>", first.Capabilities[0].Signature, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SharedExecutionAndEnvelopeContractsReflectPlannedWireShapes()
+    {
+        var preview = CreateApproval().PreviewEnvelope;
+        var result = new CodeExecutionResult(
+            ProgrammaticContractConstants.SchemaVersion,
+            "cap-v1",
+            JsonNode.Parse("""{"ok":true}"""),
+            new[] { new ExecutionConsoleEntry("info", "hello") },
+            new[] { new ExecutionDiagnostic("result_spilled_to_artifact", "spilled") },
+            new[] { new ExecutionArtifactDescriptor("artifact-1", "execution.result", "result.json", "application/json", 42, 1, "2026-03-19T00:00:00Z") },
+            new[] { preview },
+            "artifact-1",
+            new[] { "tasks.complete" },
+            new ExecutionStats(1, 25, 10, 1024, 1));
+
+        Assert.Equal(ProgrammaticContractConstants.SchemaVersion, result.SchemaVersion);
+        Assert.Equal("cap-v1", result.CapabilityVersion);
+        Assert.Single(result.ApprovalsRequested);
+        Assert.Equal(1, result.Stats.ApiCalls);
+        Assert.Equal(25, result.Stats.ElapsedMs);
+        Assert.Equal(42, result.Artifacts[0].TotalBytes);
+        Assert.Equal(1, result.Artifacts[0].TotalChunks);
+        Assert.Equal("execution.result", result.Artifacts[0].Kind);
+    }
+
+    [Fact]
+    public void CanonicalJsonNormalizesNumericVectors()
+    {
+        Assert.Equal("0", CanonicalJson.NormalizeNumber("-0"));
+        Assert.Equal("0", CanonicalJson.NormalizeNumber("-0.0"));
+        Assert.Equal("1.23", CanonicalJson.NormalizeNumber("1.2300"));
+        Assert.Equal("1000", CanonicalJson.NormalizeNumber("1e+3"));
+        Assert.Equal("0.000001", CanonicalJson.NormalizeNumber("0.000001"));
+    }
+
+    [Fact]
+    public async Task ApprovalStoreTransitionsAreAtomicAndNonceFormatIsValid()
+    {
+        var approval = CreateApproval();
+        var store = new InMemoryApprovalStore();
+        await store.CreateAsync(approval);
+
+        var results = await Task.WhenAll(
+            store.TryTransitionAsync(
+                approval.ApprovalId,
+                ApprovalState.Pending,
+                current => current with { State = ApprovalState.Applying, ApplyingSinceUtc = DateTimeOffset.UtcNow }).AsTask(),
+            store.TryTransitionAsync(
+                approval.ApprovalId,
+                ApprovalState.Pending,
+                current => current with { State = ApprovalState.Cancelled }).AsTask());
+
+        Assert.Equal(1, results.Count(result => result.Status == ApprovalTransitionStatus.Success));
+        Assert.Equal(1, results.Count(result => result.Status == ApprovalTransitionStatus.UnexpectedState));
+        Assert.Equal(22, approval.ApprovalNonce.Length);
+        Assert.Matches("^[A-Za-z0-9_-]+$", approval.ApprovalNonce);
+        Assert.True(Guid.TryParse(approval.ApprovalId, out _));
+    }
+
+    [Fact]
+    public void ConversationIdValidationAndRootObjectRequirementAreEnforced()
+    {
+        Assert.True(ConversationIdValidator.IsValid("conv-123_ABC"));
+        Assert.False(ConversationIdValidator.IsValid("bad value"));
+        Assert.True(SchemaVersionValidator.IsSupported(ProgrammaticContractConstants.SchemaVersion));
+        Assert.Throws<InvalidOperationException>(() => SchemaVersionValidator.EnsureSupported(99));
+
+        var cursor = CursorCodec.CreateOffsetCursor(5, "cap-v1");
+        Assert.Equal(5, CursorCodec.ParseOffset(cursor, "cap-v1"));
+        Assert.Throws<InvalidOperationException>(() => CursorCodec.ParseOffset(cursor, "cap-v2"));
+
+        var builder = new ProgrammaticMcpBuilder();
+        builder.AddCapability<int, ListProjectsResult>(
+            "numbers.bad",
+            capability => capability
+                .WithDescription("bad")
+                .UseWhen("never")
+                .DoNotUseWhen("always")
+                .WithHandler((_, _) => ValueTask.FromResult(new ListProjectsResult(Array.Empty<string>()))));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => builder.BuildCatalog());
+        Assert.Contains("root schema", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static ProgrammaticCatalogSnapshot CreateDeterministicCatalog(string description)
+    {
+        return new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddCapability<ListProjectsInput, ListProjectsResult>(
+                "projects.list",
+                capability => capability
+                    .WithDescription(description)
+                    .UseWhen("You need to inspect projects.")
+                    .DoNotUseWhen("You need to mutate data.")
+                    .WithHandler((_, _) => ValueTask.FromResult(new ListProjectsResult(Array.Empty<string>()))))
+            .AddMutation<CompleteTaskArgs, CompleteTaskPreview, CompleteTaskApplyResult>(
+                "tasks.complete",
+                mutation => mutation
+                    .WithDescription("Completes a task.")
+                    .UseWhen("You are sure the task should be completed.")
+                    .DoNotUseWhen("You are only exploring.")
+                    .WithPreviewHandler((args, _) => ValueTask.FromResult(new CompleteTaskPreview(args.TaskId, true)))
+                    .WithSummaryFactory((args, _, _) => ValueTask.FromResult($"Complete {args.TaskId}"))
+                    .WithApplyHandler((args, _) => ValueTask.FromResult(MutationApplyResult<CompleteTaskApplyResult>.Success(new CompleteTaskApplyResult(args.TaskId, "done")))))
+            .BuildCatalog();
+    }
+
+    private static PendingApproval CreateApproval()
+    {
+        var args = JsonNode.Parse("""{"taskId":"task-1"}""")!.AsObject();
+        return new PendingApproval(
+            ApprovalTokenGenerator.GenerateApprovalId(),
+            ApprovalTokenGenerator.GenerateApprovalNonce(),
+            "tasks.complete",
+            args,
+            CapabilityVersionCalculator.CalculateArgsHash(args),
+            new MutationPreviewEnvelope(
+                "mutation_preview",
+                ApprovalTokenGenerator.GenerateApprovalId(),
+                ApprovalTokenGenerator.GenerateApprovalNonce(),
+                "tasks.complete",
+                "Complete task-1",
+                args,
+                JsonNode.Parse("""{"taskId":"task-1","willComplete":true}"""),
+                CapabilityVersionCalculator.CalculateArgsHash(args),
+                DateTimeOffset.UtcNow.AddMinutes(10).ToString("O")),
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow.AddMinutes(10),
+            "conv-1",
+            "caller-1",
+            ApprovalState.Pending,
+            null,
+            null);
+    }
+
+    public sealed record ListProjectsInput(bool IncludeArchived);
+
+    public sealed record ListProjectsResult(string[] Projects);
+
+    public sealed record GetProjectInput(string ProjectId);
+
+    public sealed record GetProjectResult(string ProjectId, string Name);
+
+    public sealed record CompleteTaskArgs(string TaskId);
+
+    public sealed record CompleteTaskPreview(string TaskId, bool WillComplete);
+
+    public sealed record CompleteTaskApplyResult(string TaskId, string Status);
+
+    public sealed record SchemaFixture(
+        Guid Id,
+        DateTimeOffset CreatedAt,
+        DateOnly DueDate,
+        TimeOnly Cutoff,
+        TimeSpan Duration,
+        Uri Url,
+        NestedFixture Nested,
+        IReadOnlyList<int> Values,
+        IReadOnlyDictionary<string, string> Metadata,
+        string? OptionalNote);
+
+    public sealed record NestedFixture(string Name);
+
+    public sealed record UnsupportedFixture(JsonElement Raw);
+}
