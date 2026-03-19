@@ -34,3 +34,6 @@ jobs:
           dotnet pack src/ProgrammaticMcp/ProgrammaticMcp.csproj --configuration Release --no-build
           dotnet pack src/ProgrammaticMcp.Jint/ProgrammaticMcp.Jint.csproj --configuration Release --no-build
           dotnet pack src/ProgrammaticMcp.AspNetCore/ProgrammaticMcp.AspNetCore.csproj --configuration Release --no-build
+
+      - name: Verify local packages
+        run: ./scripts/verify-local-packages.sh

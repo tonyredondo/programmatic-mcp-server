@@ -27,7 +27,7 @@ coverage.*
 *.coveragexml
 
 # NuGet
-packages/
+/packages/
 *.nupkg
 *.snupkg
 .nuget/

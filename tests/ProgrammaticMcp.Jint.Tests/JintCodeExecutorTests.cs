@@ -157,22 +157,13 @@ public sealed class JintCodeExecutorTests
                 new CodeExecutionRequest(
                     "conv-1",
                     "async function main(input) { return input; }",
-                    Args: JsonNode.Parse("""{"value":"123456789"}"""))));
+                    Args: JsonNode.Parse("""{"value":"123456789"}""")!.AsObject())));
     }
 
     [Fact]
-    public async Task InvalidEntrypointArgsProduceStructuredDiagnostics()
+    public void CodeExecutionRequestArgsAreObjectTyped()
     {
-        var fixture = CreateFixture();
-
-        var result = await fixture.Executor.ExecuteAsync(
-            new CodeExecutionRequest(
-                "conv-1",
-                "async function main(input) { return input; }",
-                Args: JsonNode.Parse("""["not","an","object"]""")));
-
-        Assert.Null(result.Result);
-        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "invalid_entrypoint_args");
+        Assert.Equal(typeof(JsonObject), typeof(CodeExecutionRequest).GetProperty(nameof(CodeExecutionRequest.Args))!.PropertyType);
     }
 
     [Fact]

@@ -13,29 +13,31 @@ public static class TypeScriptDeclarationGenerator
     /// </summary>
     public static string Generate(IReadOnlyList<CapabilityDefinition> capabilities)
     {
+        return Generate(capabilities, TypeScriptNamingPlan.Create(capabilities));
+    }
+
+    /// <summary>
+    /// Generates the declaration payload for the supplied capabilities with a shared naming plan.
+    /// </summary>
+    internal static string Generate(IReadOnlyList<CapabilityDefinition> capabilities, TypeScriptNamingPlan namingPlan)
+    {
         var builder = new StringBuilder();
-        var declaredNames = new Dictionary<string, int>(StringComparer.Ordinal);
 
         builder.AppendLine("declare namespace programmatic {");
 
         foreach (var capability in capabilities)
         {
-            var identifierBase = ApiPathUtilities.ToPascalCaseIdentifier(capability.ApiPath);
-            var inputTypeName = Reserve($"{identifierBase}Input", declaredNames);
-            var resultTypeName = Reserve($"{identifierBase}Result", declaredNames);
-
-            builder.Append("  type ").Append(inputTypeName).Append(" = ").Append(RenderTypeScript(capability.Input.Schema)).AppendLine(";");
-            builder.Append("  type ").Append(resultTypeName).Append(" = ").Append(RenderTypeScript(capability.Result.Schema)).AppendLine(";");
+            var names = namingPlan.Get(capability.ApiPath);
+            EmitAlias(builder, names.InputTypeName, capability.Input.Schema);
+            EmitAlias(builder, names.ResultTypeName, capability.Result.Schema);
 
             if (capability.IsMutation && capability.PreviewPayloadSchema is not null)
             {
-                var previewPayloadName = Reserve($"{identifierBase}PreviewPayload", declaredNames);
-                builder.Append("  type ").Append(previewPayloadName).Append(" = ").Append(RenderTypeScript(capability.PreviewPayloadSchema)).AppendLine(";");
+                EmitAlias(builder, names.PreviewPayloadTypeName!, capability.PreviewPayloadSchema);
 
                 if (capability.ApplyResultSchema is not null)
                 {
-                    var applyResultName = Reserve($"{identifierBase}ApplyResult", declaredNames);
-                    builder.Append("  type ").Append(applyResultName).Append(" = ").Append(RenderTypeScript(capability.ApplyResultSchema)).AppendLine(";");
+                    EmitAlias(builder, names.ApplyResultTypeName!, capability.ApplyResultSchema);
                 }
             }
         }
@@ -48,18 +50,170 @@ public static class TypeScriptDeclarationGenerator
                 builder.Append("  namespace ").Append(string.Join('.', segments.Take(depth + 1))).AppendLine(" { }");
             }
 
-            var baseName = ApiPathUtilities.ToPascalCaseIdentifier(capability.ApiPath);
+            var names = namingPlan.Get(capability.ApiPath);
+            if (segments.Count == 1)
+            {
+                builder.Append("  function ").Append(segments[0]).Append("(input: ")
+                    .Append(names.InputTypeName)
+                    .Append("): Promise<")
+                    .Append(names.ResultTypeName)
+                    .AppendLine(">;");
+                continue;
+            }
+
             builder.Append("  namespace ").Append(string.Join('.', segments.Take(segments.Count - 1))).AppendLine(" {");
             builder.Append("    function ").Append(segments[^1]).Append("(input: ")
-                .Append($"{baseName}Input")
+                .Append(names.InputTypeName)
                 .Append("): Promise<")
-                .Append($"{baseName}Result")
+                .Append(names.ResultTypeName)
                 .AppendLine(">;");
             builder.AppendLine("  }");
         }
 
         builder.AppendLine("}");
         return builder.ToString();
+    }
+
+    private static void EmitAlias(StringBuilder builder, string rootAliasName, JsonNode schema)
+    {
+        var schemaObject = schema.AsObject();
+        var definitionAliases = BuildDefinitionAliasMap(rootAliasName, schemaObject);
+
+        foreach (var definition in definitionAliases.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
+        {
+            var definitionSchema = schemaObject["$defs"]![definition.Key]!;
+            builder.Append("  type ").Append(definition.Value).Append(" = ")
+                .Append(RenderTypeScript(definitionSchema, definitionAliases))
+                .AppendLine(";");
+        }
+
+        builder.Append("  type ").Append(rootAliasName).Append(" = ")
+            .Append(RenderTypeScript(schemaObject, definitionAliases))
+            .AppendLine(";");
+    }
+
+    private static Dictionary<string, string> BuildDefinitionAliasMap(string rootAliasName, JsonObject schema)
+    {
+        var aliases = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (schema["$defs"] is not JsonObject definitions)
+        {
+            return aliases;
+        }
+
+        foreach (var definition in definitions.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
+        {
+            aliases[definition.Key] = $"{rootAliasName}{definition.Key}";
+        }
+
+        return aliases;
+    }
+
+    private static string RenderTypeScript(JsonNode schema, IReadOnlyDictionary<string, string> definitionAliases)
+    {
+        var schemaObject = schema.AsObject();
+        if (schemaObject.TryGetPropertyValue("$ref", out var reference) && reference is JsonValue referenceValue)
+        {
+            var definitionName = referenceValue.GetValue<string>().Split('/').Last();
+            return definitionAliases.TryGetValue(definitionName, out var alias) ? alias : definitionName;
+        }
+
+        if (schemaObject["enum"] is JsonArray enumArray)
+        {
+            return string.Join(" | ", enumArray.Select(static item => item!.ToJsonString()));
+        }
+
+        if (schemaObject["type"] is JsonArray unionArray)
+        {
+            return string.Join(" | ", unionArray.Select(typeNode => RenderScalarType(typeNode!.GetValue<string>(), schemaObject, definitionAliases)));
+        }
+
+        if (schemaObject["type"] is JsonValue typeValue)
+        {
+            return RenderScalarType(typeValue.GetValue<string>(), schemaObject, definitionAliases);
+        }
+
+        return "unknown";
+    }
+
+    private static string RenderScalarType(string type, JsonObject schema, IReadOnlyDictionary<string, string> definitionAliases)
+    {
+        return type switch
+        {
+            "object" => RenderObject(schema, definitionAliases),
+            "array" => $"{RenderTypeScript(schema["items"]!, definitionAliases)}[]",
+            "string" => "string",
+            "integer" => "number",
+            "number" => "number",
+            "boolean" => "boolean",
+            "null" => "null",
+            _ => "unknown"
+        };
+    }
+
+    private static string RenderObject(JsonObject schema, IReadOnlyDictionary<string, string> definitionAliases)
+    {
+        var properties = schema["properties"]?.AsObject();
+        if (properties is null || properties.Count == 0)
+        {
+            if (schema["additionalProperties"] is JsonObject additionalProperties)
+            {
+                return $"Record<string, {RenderTypeScript(additionalProperties, definitionAliases)}>";
+            }
+
+            return "Record<string, unknown>";
+        }
+
+        var required = schema["required"]?.AsArray().Select(static node => node!.GetValue<string>()).ToHashSet(StringComparer.Ordinal)
+            ?? new HashSet<string>(StringComparer.Ordinal);
+        var members = properties
+            .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+            .Select(pair => $"{pair.Key}{(required.Contains(pair.Key) ? string.Empty : "?")}: {RenderTypeScript(pair.Value!, definitionAliases)}");
+        return "{ " + string.Join("; ", members) + " }";
+    }
+}
+
+/// <summary>
+/// Shared naming plan for generated TypeScript declarations and catalog signatures.
+/// </summary>
+internal sealed class TypeScriptNamingPlan
+{
+    private readonly Dictionary<string, CapabilityTypeNames> _capabilitiesByApiPath;
+
+    private TypeScriptNamingPlan(Dictionary<string, CapabilityTypeNames> capabilitiesByApiPath)
+    {
+        _capabilitiesByApiPath = capabilitiesByApiPath;
+    }
+
+    public static TypeScriptNamingPlan Create(IReadOnlyList<CapabilityDefinition> capabilities)
+    {
+        var declaredNames = new Dictionary<string, int>(StringComparer.Ordinal);
+        var items = new Dictionary<string, CapabilityTypeNames>(StringComparer.Ordinal);
+
+        foreach (var capability in capabilities)
+        {
+            var identifierBase = ApiPathUtilities.ToPascalCaseIdentifier(capability.ApiPath);
+            var inputTypeName = Reserve($"{identifierBase}Input", declaredNames);
+            var resultTypeName = Reserve($"{identifierBase}Result", declaredNames);
+            var previewPayloadTypeName = capability.IsMutation && capability.PreviewPayloadSchema is not null
+                ? Reserve($"{identifierBase}PreviewPayload", declaredNames)
+                : null;
+            var applyResultTypeName = capability.IsMutation && capability.ApplyResultSchema is not null
+                ? Reserve($"{identifierBase}ApplyResult", declaredNames)
+                : null;
+
+            items[capability.ApiPath] = new CapabilityTypeNames(
+                inputTypeName,
+                resultTypeName,
+                previewPayloadTypeName,
+                applyResultTypeName);
+        }
+
+        return new TypeScriptNamingPlan(items);
+    }
+
+    public CapabilityTypeNames Get(string apiPath)
+    {
+        return _capabilitiesByApiPath[apiPath];
     }
 
     private static string Reserve(string baseName, Dictionary<string, int> counts)
@@ -74,61 +228,13 @@ public static class TypeScriptDeclarationGenerator
         counts[baseName] = count;
         return $"{baseName}{count}";
     }
-
-    private static string RenderTypeScript(JsonNode schema)
-    {
-        var schemaObject = schema.AsObject();
-        if (schemaObject.TryGetPropertyValue("$ref", out var reference) && reference is JsonValue referenceValue)
-        {
-            return referenceValue.GetValue<string>().Split('/').Last();
-        }
-
-        if (schemaObject["enum"] is JsonArray enumArray)
-        {
-            return string.Join(" | ", enumArray.Select(static item => item!.ToJsonString()));
-        }
-
-        if (schemaObject["type"] is JsonArray unionArray)
-        {
-            return string.Join(" | ", unionArray.Select(typeNode => RenderScalarType(typeNode!.GetValue<string>(), schemaObject)));
-        }
-
-        if (schemaObject["type"] is JsonValue typeValue)
-        {
-            return RenderScalarType(typeValue.GetValue<string>(), schemaObject);
-        }
-
-        return "unknown";
-    }
-
-    private static string RenderScalarType(string type, JsonObject schema)
-    {
-        return type switch
-        {
-            "object" => RenderObject(schema),
-            "array" => $"{RenderTypeScript(schema["items"]!)}[]",
-            "string" => "string",
-            "integer" => "number",
-            "number" => "number",
-            "boolean" => "boolean",
-            "null" => "null",
-            _ => "unknown"
-        };
-    }
-
-    private static string RenderObject(JsonObject schema)
-    {
-        var properties = schema["properties"]?.AsObject();
-        if (properties is null)
-        {
-            return "Record<string, unknown>";
-        }
-
-        var required = schema["required"]?.AsArray().Select(static node => node!.GetValue<string>()).ToHashSet(StringComparer.Ordinal)
-            ?? new HashSet<string>(StringComparer.Ordinal);
-        var members = properties
-            .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
-            .Select(pair => $"{pair.Key}{(required.Contains(pair.Key) ? string.Empty : "?")}: {RenderTypeScript(pair.Value!)}");
-        return "{ " + string.Join("; ", members) + " }";
-    }
 }
+
+/// <summary>
+/// Resolved TypeScript alias names for a single capability.
+/// </summary>
+internal sealed record CapabilityTypeNames(
+    string InputTypeName,
+    string ResultTypeName,
+    string? PreviewPayloadTypeName,
+    string? ApplyResultTypeName);

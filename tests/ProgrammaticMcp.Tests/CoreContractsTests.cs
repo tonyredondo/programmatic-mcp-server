@@ -163,6 +163,35 @@ public sealed class CoreContractsTests
     }
 
     [Fact]
+    public void GeneratedTypeScriptResolvesDefinitionsAndCollisionNamesConsistently()
+    {
+        var catalog = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddCapability<RepeatedContainer, RepeatedContainer>(
+                "foo.bar",
+                capability => capability
+                    .WithDescription("First colliding capability.")
+                    .UseWhen("You need the first capability.")
+                    .DoNotUseWhen("You need the second capability.")
+                    .WithHandler((input, _) => ValueTask.FromResult(input)))
+            .AddCapability<RepeatedContainer, RepeatedContainer>(
+                "fooBar",
+                capability => capability
+                    .WithDescription("Second colliding capability.")
+                    .UseWhen("You need the second capability.")
+                    .DoNotUseWhen("You need the first capability.")
+                    .WithHandler((input, _) => ValueTask.FromResult(input)))
+            .BuildCatalog();
+
+        Assert.Contains("type FooBarInputRepeatedNode =", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Contains("primary: FooBarInputRepeatedNode", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Contains("function bar(input: FooBarInput): Promise<FooBarResult>;", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Contains("function fooBar(input: FooBarInput2): Promise<FooBarResult2>;", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Equal("foo.bar(input: FooBarInput) -> Promise<FooBarResult>", catalog.Capabilities[0].Signature);
+        Assert.Equal("fooBar(input: FooBarInput2) -> Promise<FooBarResult2>", catalog.Capabilities[1].Signature);
+    }
+
+    [Fact]
     public void SharedExecutionAndEnvelopeContractsReflectPlannedWireShapes()
     {
         var preview = CreateApproval().PreviewEnvelope;
@@ -196,6 +225,35 @@ public sealed class CoreContractsTests
         Assert.Equal("1.23", CanonicalJson.NormalizeNumber("1.2300"));
         Assert.Equal("1000", CanonicalJson.NormalizeNumber("1e+3"));
         Assert.Equal("0.000001", CanonicalJson.NormalizeNumber("0.000001"));
+        Assert.Equal("333333333.3333333", CanonicalJson.NormalizeNumber("333333333.33333329"));
+        Assert.Equal("1e-27", CanonicalJson.NormalizeNumber("0.000000000000000000000000001"));
+    }
+
+    [Fact]
+    public void MutationListContractOmitsApprovalNonce()
+    {
+        var response = new MutationListResponse(
+            ProgrammaticContractConstants.SchemaVersion,
+            "cap-v1",
+            new[]
+            {
+                new MutationListItem(
+                    "mutation_preview",
+                    "approval-1",
+                    "tasks.complete",
+                    "Complete task-1",
+                    JsonNode.Parse("""{"taskId":"task-1"}""")!.AsObject(),
+                    JsonNode.Parse("""{"taskId":"task-1","willComplete":true}"""),
+                    "args-hash",
+                    "2026-03-19T00:00:00Z")
+            },
+            null);
+
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var serialized = JsonSerializer.SerializeToNode(response, options)!.AsObject();
+        var item = Assert.Single(serialized["items"]!.AsArray())!.AsObject();
+
+        Assert.False(item.ContainsKey("approvalNonce"));
     }
 
     [Fact]
@@ -251,6 +309,41 @@ public sealed class CoreContractsTests
 
         var expired = await store.ReadAsync(new ArtifactReadRequest("artifact-expired", "conv-expired", "caller-expired"));
         Assert.False(expired.Found);
+    }
+
+    [Fact]
+    public async Task ArtifactStorePagesReadsThroughTheCoreCursorContract()
+    {
+        var options = new ArtifactRetentionOptions(
+            ArtifactTtlSeconds: 60,
+            MaxArtifactBytesPerArtifact: 64,
+            MaxArtifactsPerConversation: 3,
+            MaxArtifactBytesPerConversation: 128,
+            MaxArtifactBytesGlobal: 256,
+            ArtifactChunkBytes: 4);
+        var store = new InMemoryArtifactStore(options);
+
+        await store.WriteAsync(new ArtifactWriteRequest(
+            "artifact-1",
+            "conv-1",
+            "caller-1",
+            "execution.result",
+            "artifact.txt",
+            "text/plain",
+            "abcdefghijkl",
+            DateTimeOffset.UtcNow.AddMinutes(1)));
+
+        var page1 = await store.ReadAsync(new ArtifactReadRequest("artifact-1", "conv-1", "caller-1", Limit: 2));
+        Assert.True(page1.Found);
+        Assert.Equal(2, page1.Items.Count);
+        Assert.NotNull(page1.NextCursor);
+        Assert.Equal(3, page1.TotalChunks);
+
+        var page2 = await store.ReadAsync(new ArtifactReadRequest("artifact-1", "conv-1", "caller-1", page1.NextCursor, 2));
+        Assert.True(page2.Found);
+        Assert.Single(page2.Items);
+        Assert.Null(page2.NextCursor);
+        Assert.Equal("ijkl", page2.Items[0].Content);
     }
 
     [Fact]
@@ -395,6 +488,12 @@ public sealed class CoreContractsTests
         string? OptionalNote);
 
     public sealed record NestedFixture(string Name);
+
+    public sealed record RepeatedContainer(RepeatedNode Primary, RepeatedNode Secondary);
+
+    public sealed record RepeatedNode(string Name, RepeatedLeaf Leaf);
+
+    public sealed record RepeatedLeaf(int Count);
 
     public sealed record UnsupportedFixture(JsonElement Raw);
 }

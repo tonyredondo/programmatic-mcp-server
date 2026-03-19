@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace ProgrammaticMcp;
@@ -21,7 +22,12 @@ public sealed record ArtifactWriteRequest(
 /// <summary>
 /// Request used when reading an artifact from the built-in store.
 /// </summary>
-public sealed record ArtifactReadRequest(string ArtifactId, string ConversationId, string CallerBindingId);
+public sealed record ArtifactReadRequest(
+    string ArtifactId,
+    string ConversationId,
+    string CallerBindingId,
+    string? Cursor = null,
+    int? Limit = null);
 
 /// <summary>
 /// A single artifact chunk returned from storage.
@@ -38,6 +44,7 @@ public sealed record ArtifactReadResult(
     string? Name,
     string? MimeType,
     IReadOnlyList<ArtifactChunk> Items,
+    string? NextCursor,
     int? TotalChunks,
     int? TotalBytes,
     DateTimeOffset? ExpiresAt);
@@ -91,9 +98,51 @@ public interface IArtifactStore
 }
 
 /// <summary>
+/// Base helper for custom artifact stores.
+/// </summary>
+public abstract class ArtifactStoreBase : IArtifactStore
+{
+    /// <inheritdoc />
+    public virtual ValueTask WriteAsync(ArtifactWriteRequest request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return WriteCoreAsync(request, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public virtual ValueTask<ArtifactReadResult> ReadAsync(ArtifactReadRequest request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ReadCoreAsync(request, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public virtual ValueTask SweepExpiredAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return SweepExpiredCoreAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Writes an artifact record.
+    /// </summary>
+    protected abstract ValueTask WriteCoreAsync(ArtifactWriteRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Reads an artifact record.
+    /// </summary>
+    protected abstract ValueTask<ArtifactReadResult> ReadCoreAsync(ArtifactReadRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Removes expired artifacts.
+    /// </summary>
+    protected abstract ValueTask SweepExpiredCoreAsync(CancellationToken cancellationToken);
+}
+
+/// <summary>
 /// In-memory artifact store used by the default implementation.
 /// </summary>
-public sealed class InMemoryArtifactStore : IArtifactStore
+public sealed class InMemoryArtifactStore : ArtifactStoreBase
 {
     private readonly ConcurrentDictionary<string, StoredArtifact> _entries = new(StringComparer.Ordinal);
     private readonly ArtifactRetentionOptions _options;
@@ -108,10 +157,8 @@ public sealed class InMemoryArtifactStore : IArtifactStore
     }
 
     /// <inheritdoc />
-    public ValueTask WriteAsync(ArtifactWriteRequest request, CancellationToken cancellationToken = default)
+    protected override ValueTask WriteCoreAsync(ArtifactWriteRequest request, CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-
         var totalBytes = Encoding.UTF8.GetByteCount(request.Content);
         if (totalBytes > _options.MaxArtifactBytesPerArtifact)
         {
@@ -159,10 +206,8 @@ public sealed class InMemoryArtifactStore : IArtifactStore
     }
 
     /// <inheritdoc />
-    public ValueTask<ArtifactReadResult> ReadAsync(ArtifactReadRequest request, CancellationToken cancellationToken = default)
+    protected override ValueTask<ArtifactReadResult> ReadCoreAsync(ArtifactReadRequest request, CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-
         lock (_gate)
         {
             CleanupExpired(DateTimeOffset.UtcNow);
@@ -171,10 +216,32 @@ public sealed class InMemoryArtifactStore : IArtifactStore
                 || entry.ConversationId != request.ConversationId
                 || entry.CallerBindingId != request.CallerBindingId)
             {
-                return ValueTask.FromResult(new ArtifactReadResult(false, null, null, null, null, Array.Empty<ArtifactChunk>(), null, null, null));
+                return ValueTask.FromResult(new ArtifactReadResult(false, null, null, null, null, Array.Empty<ArtifactChunk>(), null, null, null, null));
             }
 
             var chunks = Chunk(entry.Content, _options.ArtifactChunkBytes);
+            var offset = ArtifactReadCursorCodec.Parse(
+                request.Cursor,
+                request.ArtifactId,
+                request.ConversationId,
+                request.CallerBindingId,
+                entry.ExpiresAt);
+            var limit = request.Limit ?? chunks.Count;
+            if (limit <= 0)
+            {
+                throw new InvalidOperationException("Artifact read limit must be positive.");
+            }
+
+            var page = chunks.Skip(offset).Take(limit).ToArray();
+            var nextCursor = offset + page.Length < chunks.Count
+                ? ArtifactReadCursorCodec.Create(
+                    offset + page.Length,
+                    request.ArtifactId,
+                    request.ConversationId,
+                    request.CallerBindingId,
+                    entry.ExpiresAt)
+                : null;
+
             return ValueTask.FromResult(
                 new ArtifactReadResult(
                     true,
@@ -182,7 +249,8 @@ public sealed class InMemoryArtifactStore : IArtifactStore
                     entry.Kind,
                     entry.Name,
                     entry.MimeType,
-                    chunks,
+                    page,
+                    nextCursor,
                     chunks.Count,
                     entry.TotalBytes,
                     entry.ExpiresAt));
@@ -190,10 +258,8 @@ public sealed class InMemoryArtifactStore : IArtifactStore
     }
 
     /// <inheritdoc />
-    public ValueTask SweepExpiredAsync(CancellationToken cancellationToken = default)
+    protected override ValueTask SweepExpiredCoreAsync(CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-
         lock (_gate)
         {
             CleanupExpired(DateTimeOffset.UtcNow);
@@ -296,6 +362,34 @@ public sealed record PendingApproval(
     string? FailureCode);
 
 /// <summary>
+/// Request used to create a mutation preview and pending approval.
+/// </summary>
+public sealed record MutationPreviewRequest(
+    string MutationName,
+    string ConversationId,
+    string CallerBindingId,
+    JsonObject Args,
+    IServiceProvider Services,
+    object? Principal);
+
+/// <summary>
+/// Result returned when a mutation preview is created.
+/// </summary>
+public sealed record MutationPreviewResult(
+    MutationPreviewEnvelope PreviewEnvelope,
+    PendingApproval PendingApproval);
+
+/// <summary>
+/// Decision used to apply or cancel a previously issued approval.
+/// </summary>
+public sealed record ApprovalDecision(
+    string ConversationId,
+    string CallerBindingId,
+    string ApprovalId,
+    string ApprovalNonce,
+    object? Principal);
+
+/// <summary>
 /// Result of an approval state transition attempt.
 /// </summary>
 public sealed record ApprovalTransitionResult(
@@ -343,14 +437,127 @@ public interface IApprovalStore
 }
 
 /// <summary>
+/// Previews a mutation and creates a pending approval record.
+/// </summary>
+public interface IMutationPreviewer
+{
+    /// <summary>
+    /// Creates a mutation preview.
+    /// </summary>
+    ValueTask<MutationPreviewResult> PreviewAsync(MutationPreviewRequest request, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Applies or cancels a stored approval.
+/// </summary>
+public interface IMutationExecutor
+{
+    /// <summary>
+    /// Applies a stored approval.
+    /// </summary>
+    ValueTask<MutationApplyResponse> ApplyAsync(ApprovalDecision decision, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Cancels a stored approval.
+    /// </summary>
+    ValueTask<MutationCancelResponse> CancelAsync(ApprovalDecision decision, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Base helper for custom approval stores.
+/// </summary>
+public abstract class ApprovalStoreBase : IApprovalStore
+{
+    /// <inheritdoc />
+    public virtual ValueTask CreateAsync(PendingApproval approval, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return CreateCoreAsync(approval, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public virtual ValueTask<PendingApproval?> GetAsync(string approvalId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return GetCoreAsync(approvalId, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public virtual ValueTask<IReadOnlyList<PendingApproval>> ListPendingAsync(string conversationId, string callerBindingId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ListPendingCoreAsync(conversationId, callerBindingId, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public virtual ValueTask<ApprovalTransitionResult> TryTransitionAsync(
+        string approvalId,
+        ApprovalState expectedState,
+        Func<PendingApproval, PendingApproval> transition,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return TryTransitionCoreAsync(approvalId, expectedState, transition, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public virtual ValueTask<IReadOnlyList<PendingApproval>> ListAllAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ListAllCoreAsync(cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public virtual ValueTask SweepExpiredAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return SweepExpiredCoreAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Creates a new approval record.
+    /// </summary>
+    protected abstract ValueTask CreateCoreAsync(PendingApproval approval, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Gets an approval record by identifier.
+    /// </summary>
+    protected abstract ValueTask<PendingApproval?> GetCoreAsync(string approvalId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists pending approvals for a conversation and caller binding.
+    /// </summary>
+    protected abstract ValueTask<IReadOnlyList<PendingApproval>> ListPendingCoreAsync(string conversationId, string callerBindingId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Attempts to transition an approval from an expected state.
+    /// </summary>
+    protected abstract ValueTask<ApprovalTransitionResult> TryTransitionCoreAsync(
+        string approvalId,
+        ApprovalState expectedState,
+        Func<PendingApproval, PendingApproval> transition,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists every approval currently stored.
+    /// </summary>
+    protected abstract ValueTask<IReadOnlyList<PendingApproval>> ListAllCoreAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Removes expired approvals.
+    /// </summary>
+    protected abstract ValueTask SweepExpiredCoreAsync(CancellationToken cancellationToken);
+}
+
+/// <summary>
 /// In-memory approval store used by the default implementation.
 /// </summary>
-public sealed class InMemoryApprovalStore : IApprovalStore
+public sealed class InMemoryApprovalStore : ApprovalStoreBase
 {
     private readonly ConcurrentDictionary<string, ApprovalEntry> _entries = new(StringComparer.Ordinal);
 
     /// <inheritdoc />
-    public ValueTask CreateAsync(PendingApproval approval, CancellationToken cancellationToken = default)
+    protected override ValueTask CreateCoreAsync(PendingApproval approval, CancellationToken cancellationToken)
     {
         if (!_entries.TryAdd(approval.ApprovalId, new ApprovalEntry(approval)))
         {
@@ -361,14 +568,14 @@ public sealed class InMemoryApprovalStore : IApprovalStore
     }
 
     /// <inheritdoc />
-    public ValueTask<PendingApproval?> GetAsync(string approvalId, CancellationToken cancellationToken = default)
+    protected override ValueTask<PendingApproval?> GetCoreAsync(string approvalId, CancellationToken cancellationToken)
     {
         CleanupExpired(DateTimeOffset.UtcNow);
         return ValueTask.FromResult(_entries.TryGetValue(approvalId, out var entry) ? entry.Current : null);
     }
 
     /// <inheritdoc />
-    public ValueTask<IReadOnlyList<PendingApproval>> ListPendingAsync(string conversationId, string callerBindingId, CancellationToken cancellationToken = default)
+    protected override ValueTask<IReadOnlyList<PendingApproval>> ListPendingCoreAsync(string conversationId, string callerBindingId, CancellationToken cancellationToken)
     {
         CleanupExpired(DateTimeOffset.UtcNow);
         var results = _entries.Values
@@ -383,15 +590,14 @@ public sealed class InMemoryApprovalStore : IApprovalStore
     }
 
     /// <inheritdoc />
-    public ValueTask<IReadOnlyList<PendingApproval>> ListAllAsync(CancellationToken cancellationToken = default)
+    protected override ValueTask<IReadOnlyList<PendingApproval>> ListAllCoreAsync(CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
         CleanupExpired(DateTimeOffset.UtcNow);
         return ValueTask.FromResult<IReadOnlyList<PendingApproval>>(_entries.Values.Select(static entry => entry.Current).OrderBy(static approval => approval.CreatedAt).ToArray());
     }
 
     /// <inheritdoc />
-    public async ValueTask<ApprovalTransitionResult> TryTransitionAsync(
+    protected override async ValueTask<ApprovalTransitionResult> TryTransitionCoreAsync(
         string approvalId,
         ApprovalState expectedState,
         Func<PendingApproval, PendingApproval> transition,
@@ -421,9 +627,8 @@ public sealed class InMemoryApprovalStore : IApprovalStore
     }
 
     /// <inheritdoc />
-    public ValueTask SweepExpiredAsync(CancellationToken cancellationToken = default)
+    protected override ValueTask SweepExpiredCoreAsync(CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
         CleanupExpired(DateTimeOffset.UtcNow);
         return ValueTask.CompletedTask;
     }
@@ -552,4 +757,53 @@ public interface ICallerBindingStrategy
     /// Resolves a stable caller binding identifier.
     /// </summary>
     ValueTask<string?> ResolveAsync(CallerBindingContext context, CancellationToken cancellationToken = default);
+}
+
+internal static class ArtifactReadCursorCodec
+{
+    public static string Create(int offset, string artifactId, string conversationId, string callerBindingId, DateTimeOffset expiresAt)
+    {
+        var payload = new JsonObject
+        {
+            ["artifactId"] = artifactId,
+            ["conversationId"] = conversationId,
+            ["callerBindingId"] = callerBindingId,
+            ["expiresAt"] = expiresAt.ToString("O"),
+            ["offset"] = offset
+        };
+
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(payload.ToJsonString()));
+    }
+
+    public static int Parse(string? cursor, string artifactId, string conversationId, string callerBindingId, DateTimeOffset expiresAt)
+    {
+        if (string.IsNullOrWhiteSpace(cursor))
+        {
+            return 0;
+        }
+
+        try
+        {
+            var payload = JsonNode.Parse(Encoding.UTF8.GetString(Convert.FromBase64String(cursor)))!.AsObject();
+            if (!string.Equals(payload["artifactId"]?.GetValue<string>(), artifactId, StringComparison.Ordinal)
+                || !string.Equals(payload["conversationId"]?.GetValue<string>(), conversationId, StringComparison.Ordinal)
+                || !string.Equals(payload["callerBindingId"]?.GetValue<string>(), callerBindingId, StringComparison.Ordinal)
+                || !string.Equals(payload["expiresAt"]?.GetValue<string>(), expiresAt.ToString("O"), StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Artifact cursor does not match the requested artifact.");
+            }
+
+            var offset = payload["offset"]?.GetValue<int>() ?? 0;
+            if (offset < 0)
+            {
+                throw new InvalidOperationException("Artifact cursor offset is invalid.");
+            }
+
+            return offset;
+        }
+        catch (Exception exception) when (exception is FormatException or InvalidOperationException or JsonException)
+        {
+            throw new InvalidOperationException("Artifact cursor is invalid.", exception);
+        }
+    }
 }

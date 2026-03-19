@@ -34,6 +34,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         Assert.Contains("/mcp/types", client.ServerInstructions, StringComparison.Ordinal);
         Assert.Contains("maxCodeBytes", client.ServerInstructions, StringComparison.Ordinal);
         Assert.Contains("cookie", client.ServerInstructions, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("^[A-Za-z0-9._:-]{1,128}$", client.ServerInstructions, StringComparison.Ordinal);
 
         var tools = await client.ListToolsAsync();
         var names = tools.Select(tool => tool.ProtocolTool.Name).OrderBy(static name => name, StringComparer.Ordinal).ToArray();
@@ -301,6 +302,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
 
         var item = Assert.Single(listed.StructuredContent["items"]!.AsArray());
         Assert.Equal(approval!["approvalId"]!.GetValue<string>(), item!["approvalId"]!.GetValue<string>());
+        Assert.Null(item["approvalNonce"]);
 
         var apply = await reconnectedClient.CallToolAsync(
             "mutation.apply",

@@ -77,30 +77,6 @@ public sealed class JintCodeExecutor : ICodeExecutor
                 runtimeMetrics: new RuntimeMetrics(0, 0));
         }
 
-        if (request.Args is not null && request.Args is not JsonObject)
-        {
-            stopwatch.Stop();
-            return CreateResult(
-                request,
-                result: null,
-                console: Array.Empty<ExecutionConsoleEntry>(),
-                diagnostics: new[]
-                {
-                    new ExecutionDiagnostic(
-                        "invalid_entrypoint_args",
-                        "Entrypoint args must be a JSON object.",
-                        new JsonObject { ["entrypoint"] = request.Entrypoint })
-                },
-                artifacts: Array.Empty<ExecutionArtifactDescriptor>(),
-                approvalsRequested: Array.Empty<MutationPreviewEnvelope>(),
-                resultArtifactId: null,
-                effectiveVisibleApiPaths: null,
-                stopwatch.Elapsed,
-                apiCalls: 0,
-                consoleLinesEmitted: 0,
-                runtimeMetrics: new RuntimeMetrics(0, 0));
-        }
-
         var visibleCapabilities = ResolveVisibleCapabilities(request.VisibleApiPaths);
         var callerBindingId = string.IsNullOrWhiteSpace(request.CallerBindingId) ? null : request.CallerBindingId;
         var diagnostics = new List<ExecutionDiagnostic>();

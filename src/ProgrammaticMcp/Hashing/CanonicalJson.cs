@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Encodings.Web;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
@@ -69,19 +70,10 @@ public static class CanonicalJson
     /// </summary>
     public static string NormalizeNumber(string raw)
     {
-        if (BigInteger.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var integer))
+        if (IsIntegerLiteral(raw)
+            && BigInteger.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var integer))
         {
             return integer.ToString(CultureInfo.InvariantCulture);
-        }
-
-        if (decimal.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var decimalValue))
-        {
-            if (decimalValue == decimal.Zero)
-            {
-                return "0";
-            }
-
-            return TrimDecimal(decimalValue.ToString(CultureInfo.InvariantCulture));
         }
 
         if (!double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
@@ -89,29 +81,81 @@ public static class CanonicalJson
             throw new InvalidOperationException($"'{raw}' is not a valid JSON number.");
         }
 
+        if (double.IsNaN(value) || double.IsInfinity(value))
+        {
+            throw new InvalidOperationException($"'{raw}' is not a valid finite JSON number.");
+        }
+
         if (value == 0d)
         {
             return "0";
         }
 
-        var text = value.ToString("G17", CultureInfo.InvariantCulture)
-            .Replace("E", "e", StringComparison.Ordinal);
+        var text = SerializeDouble(value).Replace("E", "e", StringComparison.Ordinal);
+        return NormalizeEcmaNumberText(text);
+    }
 
-        if (text.Contains('e'))
+    private static bool IsIntegerLiteral(string raw)
+    {
+        return !raw.Contains('.', StringComparison.Ordinal) && !raw.Contains('e', StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string SerializeDouble(double value)
+    {
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(
+                   buffer,
+                   new JsonWriterOptions
+                   {
+                       Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+                       SkipValidation = false
+                   }))
         {
-            var pieces = text.Split('e');
-            var exponent = pieces[1];
-            var sign = exponent.StartsWith("-", StringComparison.Ordinal) ? "-" : string.Empty;
-            exponent = exponent.TrimStart('+', '-').TrimStart('0');
-            exponent = exponent.Length == 0 ? "0" : exponent;
-            text = $"{TrimDecimal(pieces[0])}e{sign}{exponent}";
-        }
-        else
-        {
-            text = TrimDecimal(text);
+            writer.WriteNumberValue(value);
         }
 
-        return text;
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    private static string NormalizeEcmaNumberText(string text)
+    {
+        if (!text.Contains('e'))
+        {
+            return TrimDecimal(text);
+        }
+
+        var pieces = text.Split('e');
+        var mantissa = TrimDecimal(pieces[0]);
+        var exponent = int.Parse(pieces[1], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+
+        if (exponent is >= -6 and < 21)
+        {
+            return ExpandExponent(mantissa, exponent);
+        }
+
+        return $"{mantissa}e{exponent.ToString(CultureInfo.InvariantCulture)}";
+    }
+
+    private static string ExpandExponent(string mantissa, int exponent)
+    {
+        var sign = mantissa.StartsWith("-", StringComparison.Ordinal) ? "-" : string.Empty;
+        var unsignedMantissa = sign.Length == 0 ? mantissa : mantissa[1..];
+        var decimalIndex = unsignedMantissa.IndexOf('.');
+        var digits = unsignedMantissa.Replace(".", string.Empty, StringComparison.Ordinal);
+        var digitsBeforeDecimal = decimalIndex >= 0 ? decimalIndex : unsignedMantissa.Length;
+        var newDecimalIndex = digitsBeforeDecimal + exponent;
+
+        if (newDecimalIndex <= 0)
+        {
+            return sign + TrimDecimal($"0.{new string('0', -newDecimalIndex)}{digits}");
+        }
+
+        if (newDecimalIndex >= digits.Length)
+        {
+            return sign + digits + new string('0', newDecimalIndex - digits.Length);
+        }
+
+        return sign + TrimDecimal($"{digits[..newDecimalIndex]}.{digits[newDecimalIndex..]}");
     }
 
     private static string TrimDecimal(string value)

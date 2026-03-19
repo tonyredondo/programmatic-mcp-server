@@ -1,6 +1,6 @@
 # Client Compatibility
 
-This document records the Phase 4 compatibility state for the v0 HTTP MCP integration.
+This document records the compatibility state for the first implementation milestone of the v0 HTTP MCP integration.
 
 ## Repository-Validated Clients
 
@@ -8,9 +8,9 @@ The following client paths are validated by automated tests in this repository:
 
 | Client | Transport | Caller Binding | Version / Build | OS | Validation Status |
 | --- | --- | --- | --- | --- | --- |
-| Repository .NET MCP SDK harness | HTTP MCP via `ModelContextProtocol` | Session identity | `ModelContextProtocol` `1.1.0` | macOS | Validated |
-| Repository raw HTTP harness | Sessionless HTTP MCP | Cookie fallback | in-repo test harness | macOS | Validated |
-| Repository raw HTTP harness | Sessionless HTTP MCP | Signed header fallback | in-repo test harness | macOS | Validated |
+| Repository .NET MCP SDK harness | HTTP MCP via `ModelContextProtocol` | Session identity | `ModelContextProtocol` `1.1.0` | Ubuntu Linux (CI) | Validated |
+| Repository raw HTTP harness | Sessionless HTTP MCP | Cookie fallback | in-repo test harness | Ubuntu Linux (CI) | Validated |
+| Repository raw HTTP harness | Sessionless HTTP MCP | Signed header fallback | in-repo test harness | Ubuntu Linux (CI) | Validated |
 
 Validation coverage for the repository harness includes:
 
@@ -30,15 +30,6 @@ Validation coverage for the repository harness includes:
 - per-request DI scoping
 - compatibility JSON text mirroring
 
-## Locally Detected Desktop Clients
-
-The following desktop clients are installed on this machine, so their exact versions are known. They have not been automated or manually exercised by this repository during Phase 4.
-
-| Client | Installed Version | OS | Caller Binding Notes | Validation Status |
-| --- | --- | --- | --- | --- |
-| Claude Desktop | `1.1.7203` | macOS | Expected to use cookie fallback when cookies are preserved | Not yet validated in-repo |
-| Codex desktop app | `26.317.21539` | macOS | Expected to use either cookie fallback or signed-header fallback depending on client behavior | Not yet validated in-repo |
-
 ## Current Compatibility Notes
 
 - The built-in cookie fallback is intended for HTTP MCP clients that preserve cookies across reconnects.
@@ -49,10 +40,11 @@ The following desktop clients are installed on this machine, so their exact vers
 - Browser-style CORS configuration remains host-owned. The library does not enable CORS automatically.
 - Health endpoints also remain host-owned. The library does not map them automatically.
 
-## Remaining Manual Validation Work
+## Manual Compatibility Notes
 
-The remaining compatibility work is outside automated repository coverage:
+The following compatibility checks are outside the pinned repository-owned milestone matrix:
 
-- verify Claude Desktop against the cookie reconnect flow
-- verify Codex desktop against its supported caller-binding mode
-- record any client-specific limitations once those manual checks are complete
+- Local macOS runs are useful development checks, but they are not part of the pinned supported matrix unless they are added to automated validation and recorded above with exact version/build details.
+- Claude Desktop can be evaluated later against the cookie reconnect flow and documented here as an additional manual compatibility note.
+- Codex desktop can be evaluated later against its supported caller-binding mode and documented here as an additional manual compatibility note.
+- Any client-specific limitations discovered during those manual checks should be recorded here without changing the repository-owned supported matrix until the matrix is intentionally expanded.

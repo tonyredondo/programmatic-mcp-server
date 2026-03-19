@@ -6,15 +6,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="$ROOT_DIR/artifacts/packages"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
+export NUGET_PACKAGES="$WORK_DIR/.nuget/packages"
+export NUGET_HTTP_CACHE_PATH="$WORK_DIR/.nuget/http-cache"
+export NUGET_PLUGINS_CACHE_PATH="$WORK_DIR/.nuget/plugins-cache"
 
 echo "Packing library packages into $ARTIFACT_DIR"
 rm -rf "$ARTIFACT_DIR"
+dotnet restore "$ROOT_DIR/ProgrammaticMcp.sln" >/dev/null
 dotnet pack "$ROOT_DIR/src/ProgrammaticMcp/ProgrammaticMcp.csproj" --configuration Release --no-restore
 dotnet pack "$ROOT_DIR/src/ProgrammaticMcp.Jint/ProgrammaticMcp.Jint.csproj" --configuration Release --no-restore
 dotnet pack "$ROOT_DIR/src/ProgrammaticMcp.AspNetCore/ProgrammaticMcp.AspNetCore.csproj" --configuration Release --no-restore
 
 APP_DIR="$WORK_DIR/package-smoke"
-export NUGET_PACKAGES="$WORK_DIR/.nuget/packages"
 dotnet new console -n PackageSmoke --framework net10.0 --output "$APP_DIR" >/dev/null
 
 cat > "$APP_DIR/NuGet.Config" <<EOF

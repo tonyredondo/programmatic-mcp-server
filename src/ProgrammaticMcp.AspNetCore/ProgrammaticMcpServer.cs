@@ -855,7 +855,7 @@ internal static class ProgrammaticInstructionsBuilder
     {
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"Programmatic MCP flow: initialize -> tools/list -> capabilities.search -> code.execute -> artifact.read when needed -> mutation.list/apply/cancel for writes. Types: GET {routeState.TypeEndpointPath}. Mutations require stable caller binding via {(options.EnableSignedHeaderCallerBinding ? "cookie or signed header" : "cookie")}. conversationId must match ^[A-Za-z0-9_-]{{1,200}}$. code.execute is synchronous request/response in v0. Limits: timeoutMs={options.ExecutorOptions.TimeoutMs}, maxApiCalls={options.ExecutorOptions.MaxApiCalls}, maxResultBytes={options.ExecutorOptions.MaxResultBytes}, maxStatements={options.ExecutorOptions.MaxStatements}, memoryBytes={options.ExecutorOptions.MemoryBytes}, maxCodeBytes={options.ExecutorOptions.MaxCodeBytes}, maxArgsBytes={options.ExecutorOptions.MaxArgsBytes}, maxConsoleLines={options.ExecutorOptions.MaxConsoleLines}, maxConsoleBytes={options.ExecutorOptions.MaxConsoleBytes}.");
+            $"Programmatic MCP flow: initialize -> tools/list -> capabilities.search -> code.execute -> artifact.read when needed -> mutation.list/apply/cancel for writes. Types: GET {routeState.TypeEndpointPath}. Mutations require stable caller binding via {(options.EnableSignedHeaderCallerBinding ? "cookie or signed header" : "cookie")}. conversationId must match ^[A-Za-z0-9._:-]{{1,128}}$. code.execute is synchronous request/response in v0. Limits: timeoutMs={options.ExecutorOptions.TimeoutMs}, maxApiCalls={options.ExecutorOptions.MaxApiCalls}, maxResultBytes={options.ExecutorOptions.MaxResultBytes}, maxStatements={options.ExecutorOptions.MaxStatements}, memoryBytes={options.ExecutorOptions.MemoryBytes}, maxCodeBytes={options.ExecutorOptions.MaxCodeBytes}, maxArgsBytes={options.ExecutorOptions.MaxArgsBytes}, maxConsoleLines={options.ExecutorOptions.MaxConsoleLines}, maxConsoleBytes={options.ExecutorOptions.MaxConsoleBytes}.");
     }
 }
 
@@ -896,7 +896,7 @@ internal sealed class ProgrammaticMcpLifecycleService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(5));
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
             await artifactStore.SweepExpiredAsync(stoppingToken);
@@ -1076,7 +1076,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
             conversationId,
             code,
             args["entrypoint"]?.GetValue<string>() ?? "main",
-            args["args"] as JsonNode,
+            args["args"] as JsonObject,
             args["visibleApiPaths"] is JsonArray visible ? visible.Select(static node => node!.GetValue<string>()).ToArray() : null,
             args["timeoutMs"]?.GetValue<int?>(),
             args["maxApiCalls"]?.GetValue<int?>(),
@@ -1134,39 +1134,42 @@ internal sealed class ProgrammaticMcpToolHandlers(
             return CreateSuccess(new ArtifactReadResponse(1, catalog.CapabilityVersion, false, null, null, null, null, Array.Empty<ArtifactReadItem>(), null, null, null, null));
         }
 
-        var storeResponse = await artifactStore.ReadAsync(new ArtifactReadRequest(artifactId, conversationId, binding.CallerBindingId), cancellationToken);
-        if (!storeResponse.Found)
-        {
-            return CreateSuccess(new ArtifactReadResponse(1, catalog.CapabilityVersion, false, null, null, null, null, Array.Empty<ArtifactReadItem>(), null, null, null, null));
-        }
-
+        ArtifactReadResult storeResponse;
         try
         {
-            var offset = ParseArtifactCursor(args["cursor"]?.GetValue<string>(), artifactId, conversationId, binding.CallerBindingId, storeResponse.ExpiresAt!.Value);
-            var items = storeResponse.Items.Skip(offset).Take(limit).Select(static item => new ArtifactReadItem(item.Index, item.Content, item.Bytes)).ToArray();
-            var nextCursor = offset + items.Length < storeResponse.Items.Count
-                ? CreateArtifactCursor(offset + items.Length, artifactId, conversationId, binding.CallerBindingId, storeResponse.ExpiresAt!.Value)
-                : null;
-
-            return CreateSuccess(
-                new ArtifactReadResponse(
-                    1,
-                    catalog.CapabilityVersion,
-                    true,
-                    storeResponse.ArtifactId,
-                    storeResponse.Kind,
-                    storeResponse.Name,
-                    storeResponse.MimeType,
-                    items,
-                    nextCursor,
-                    storeResponse.TotalChunks,
-                    storeResponse.TotalBytes,
-                    storeResponse.ExpiresAt?.ToString("O")));
+            storeResponse = await artifactStore.ReadAsync(
+                new ArtifactReadRequest(
+                    artifactId,
+                    conversationId,
+                    binding.CallerBindingId,
+                    args["cursor"]?.GetValue<string>(),
+                    limit),
+                cancellationToken);
         }
         catch (InvalidOperationException exception)
         {
             return CreateToolError("invalid_params", exception.Message);
         }
+
+        if (!storeResponse.Found)
+        {
+            return CreateSuccess(new ArtifactReadResponse(1, catalog.CapabilityVersion, false, null, null, null, null, Array.Empty<ArtifactReadItem>(), null, null, null, null));
+        }
+
+        return CreateSuccess(
+            new ArtifactReadResponse(
+                1,
+                catalog.CapabilityVersion,
+                true,
+                storeResponse.ArtifactId,
+                storeResponse.Kind,
+                storeResponse.Name,
+                storeResponse.MimeType,
+                storeResponse.Items.Select(static item => new ArtifactReadItem(item.Index, item.Content, item.Bytes)).ToArray(),
+                storeResponse.NextCursor,
+                storeResponse.TotalChunks,
+                storeResponse.TotalBytes,
+                storeResponse.ExpiresAt?.ToString("O")));
     }
 
     private async ValueTask<CallToolResult> HandleMutationListAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
@@ -1221,47 +1224,22 @@ internal sealed class ProgrammaticMcpToolHandlers(
             }
 
             var page = snapshot.Items.Skip(offset).Take(limit)
-                .Select(static approval => new MutationPreviewEnvelope(
+                .Select(static approval => new MutationListItem(
                     approval.PreviewEnvelope.Kind,
                     approval.PreviewEnvelope.ApprovalId,
-                    approval.PreviewEnvelope.ApprovalNonce,
                     approval.PreviewEnvelope.MutationName,
                     approval.PreviewEnvelope.Summary,
-                    approval.PreviewEnvelope.Args,
+                    approval.PreviewEnvelope.Args.DeepClone().AsObject(),
                     approval.PreviewEnvelope.Preview?.DeepClone(),
                     approval.PreviewEnvelope.ActionArgsHash,
                     approval.PreviewEnvelope.ExpiresAt))
-                .Select(static envelope => new
-                {
-                    envelope.Kind,
-                    envelope.ApprovalId,
-                    envelope.MutationName,
-                    envelope.Summary,
-                    envelope.Args,
-                    envelope.Preview,
-                    envelope.ExpiresAt,
-                    envelope.ActionArgsHash
-                })
                 .ToArray();
 
             var nextCursor = offset + page.Length < snapshot.Items.Count
                 ? CreateApprovalCursor(snapshot.SnapshotId, conversationId, binding.CallerBindingId, offset + page.Length)
                 : null;
 
-            var responseItems = page.Select(
-                static item => new MutationPreviewEnvelope(
-                    item.Kind,
-                    item.ApprovalId,
-                    string.Empty,
-                    item.MutationName,
-                    item.Summary,
-                    item.Args.DeepClone().AsObject(),
-                    item.Preview?.DeepClone(),
-                    item.ActionArgsHash,
-                    item.ExpiresAt))
-                .ToArray();
-
-            return CreateSuccess(new MutationListResponse(1, catalog.CapabilityVersion, responseItems, nextCursor), omitApprovalNonce: true);
+            return CreateSuccess(new MutationListResponse(1, catalog.CapabilityVersion, page, nextCursor));
         }
         catch (InvalidOperationException exception)
         {
@@ -1513,19 +1491,9 @@ internal sealed class ProgrammaticMcpToolHandlers(
         return result;
     }
 
-    private CallToolResult CreateSuccess<T>(T payload, bool omitApprovalNonce = false)
+    private CallToolResult CreateSuccess<T>(T payload)
     {
         JsonNode node = JsonSerializer.SerializeToNode(payload, JsonSerializerOptions.Web)!;
-        if (omitApprovalNonce
-            && node is JsonObject envelope
-            && envelope["items"] is JsonArray items)
-        {
-            foreach (var item in items.OfType<JsonObject>())
-            {
-                item.Remove("approvalNonce");
-            }
-        }
-
         return CreateToolResult(node, isError: false);
     }
 
@@ -1559,45 +1527,6 @@ internal sealed class ProgrammaticMcpToolHandlers(
             StructuredContent = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web),
             Content = content
         };
-    }
-
-    private static string CreateArtifactCursor(int offset, string artifactId, string conversationId, string callerBindingId, DateTimeOffset expiresAt)
-    {
-        var payload = new JsonObject
-        {
-            ["artifactId"] = artifactId,
-            ["conversationId"] = conversationId,
-            ["callerBindingId"] = callerBindingId,
-            ["offset"] = offset,
-            ["artifactVersion"] = expiresAt.ToString("O")
-        };
-        return Convert.ToBase64String(Encoding.UTF8.GetBytes(payload.ToJsonString()));
-    }
-
-    private static int ParseArtifactCursor(string? cursor, string artifactId, string conversationId, string callerBindingId, DateTimeOffset expiresAt)
-    {
-        if (string.IsNullOrWhiteSpace(cursor))
-        {
-            return 0;
-        }
-
-        try
-        {
-            var payload = JsonNode.Parse(Encoding.UTF8.GetString(Convert.FromBase64String(cursor)))!.AsObject();
-            if (payload["artifactId"]?.GetValue<string>() != artifactId
-                || payload["conversationId"]?.GetValue<string>() != conversationId
-                || payload["callerBindingId"]?.GetValue<string>() != callerBindingId
-                || payload["artifactVersion"]?.GetValue<string>() != expiresAt.ToString("O"))
-            {
-                throw new InvalidOperationException("Cursor is invalid or stale.");
-            }
-
-            return payload["offset"]?.GetValue<int>() ?? 0;
-        }
-        catch (Exception exception) when (exception is FormatException or JsonException or InvalidOperationException)
-        {
-            throw new InvalidOperationException("Cursor is invalid or stale.", exception);
-        }
     }
 
     private static string CreateApprovalCursor(string snapshotId, string conversationId, string callerBindingId, int offset)

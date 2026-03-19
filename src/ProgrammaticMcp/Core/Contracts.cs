@@ -148,7 +148,7 @@ public sealed record CodeExecutionRequest(
     string ConversationId,
     string Code,
     string Entrypoint = "main",
-    JsonNode? Args = null,
+    JsonObject? Args = null,
     IReadOnlyList<string>? VisibleApiPaths = null,
     int? TimeoutMs = null,
     int? MaxApiCalls = null,
@@ -294,7 +294,7 @@ public sealed class CapabilityDefinition
     public required string Description { get; init; }
 
     /// <summary>Generated signature string.</summary>
-    public required string Signature { get; init; }
+    public required string Signature { get; set; }
 
     /// <summary>Usage guidance for the capability.</summary>
     public required CapabilityUsageGuidance UsageGuidance { get; init; }
@@ -354,6 +354,19 @@ public sealed record MutationPreviewEnvelope(
     string ExpiresAt);
 
 /// <summary>
+/// Item returned from mutation rediscovery.
+/// </summary>
+public sealed record MutationListItem(
+    string Kind,
+    string ApprovalId,
+    string MutationName,
+    string Summary,
+    JsonObject Args,
+    JsonNode? Preview,
+    string ActionArgsHash,
+    string ExpiresAt);
+
+/// <summary>
 /// Item returned from artifact reads.
 /// </summary>
 public sealed record ArtifactReadItem(int Index, string Text, int Bytes);
@@ -381,7 +394,7 @@ public sealed record ArtifactReadResponse(
 public sealed record MutationListResponse(
     int SchemaVersion,
     string CapabilityVersion,
-    IReadOnlyList<MutationPreviewEnvelope> Items,
+    IReadOnlyList<MutationListItem> Items,
     string? NextCursor);
 
 /// <summary>

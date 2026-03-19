@@ -69,7 +69,14 @@ public sealed class ProgrammaticMcpBuilder
             .OrderBy(static capability => capability.ApiPath, StringComparer.Ordinal)
             .ToArray();
 
-        var generatedTypeScript = TypeScriptDeclarationGenerator.Generate(capabilities);
+        var namingPlan = TypeScriptNamingPlan.Create(capabilities);
+        foreach (var capability in capabilities)
+        {
+            var names = namingPlan.Get(capability.ApiPath);
+            capability.Signature = SignatureFormatter.Format(capability.ApiPath, names.InputTypeName, names.ResultTypeName);
+        }
+
+        var generatedTypeScript = TypeScriptDeclarationGenerator.Generate(capabilities, namingPlan);
         var capabilityVersion = CapabilityVersionCalculator.Calculate(capabilities, generatedTypeScript);
         var authorizationPolicy = _authorizationPolicy ?? new AllowAllBoundCallersAuthorizationPolicy();
         return new ProgrammaticCatalogSnapshot(capabilities, capabilityVersion, generatedTypeScript, authorizationPolicy);
@@ -408,6 +415,14 @@ internal static class SignatureFormatter
     {
         var identifierBase = ApiPathUtilities.ToPascalCaseIdentifier(apiPath);
         return $"{apiPath}(input: {identifierBase}Input) -> Promise<{identifierBase}Result>";
+    }
+
+    /// <summary>
+    /// Formats a stable signature string using the resolved declaration names.
+    /// </summary>
+    public static string Format(string apiPath, string inputTypeName, string resultTypeName)
+    {
+        return $"{apiPath}(input: {inputTypeName}) -> Promise<{resultTypeName}>";
     }
 }
 
