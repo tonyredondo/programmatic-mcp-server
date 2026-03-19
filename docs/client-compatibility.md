@@ -8,9 +8,9 @@ The following client paths are validated by automated tests in this repository:
 
 | Client | Transport | Caller Binding | Version / Build | OS | Validation Status |
 | --- | --- | --- | --- | --- | --- |
-| Repository .NET MCP SDK harness | HTTP MCP via `ModelContextProtocol` | Session identity | `ModelContextProtocol` `1.1.0` | Ubuntu Linux (CI) | Validated |
-| Repository raw HTTP harness | Sessionless HTTP MCP | Cookie fallback | in-repo test harness | Ubuntu Linux (CI) | Validated |
-| Repository raw HTTP harness | Sessionless HTTP MCP | Signed header fallback | in-repo test harness | Ubuntu Linux (CI) | Validated |
+| Repository .NET MCP SDK harness | HTTP MCP via `ModelContextProtocol` | Session identity | `ModelContextProtocol` `1.1.0` on `.NET` `10.0.1` | Ubuntu Linux (CI) | Validated |
+| Repository raw HTTP harness | Sessionless HTTP MCP | Cookie fallback | `ProgrammaticMcp.AspNetCore.Tests.RawMcpClient` from this repository on `.NET` `10.0.1` | Ubuntu Linux (CI) | Validated |
+| Repository raw HTTP harness | Sessionless HTTP MCP | Signed header fallback | `ProgrammaticMcp.AspNetCore.Tests.RawMcpClient` from this repository on `.NET` `10.0.1` | Ubuntu Linux (CI) | Validated |
 
 Validation coverage for the repository harness includes:
 
@@ -45,6 +45,6 @@ Validation coverage for the repository harness includes:
 The following compatibility checks are outside the pinned repository-owned milestone matrix:
 
 - Local macOS runs are useful development checks, but they are not part of the pinned supported matrix unless they are added to automated validation and recorded above with exact version/build details.
-- Claude Desktop can be evaluated later against the cookie reconnect flow and documented here as an additional manual compatibility note.
-- Codex desktop can be evaluated later against its supported caller-binding mode and documented here as an additional manual compatibility note.
+- Claude Desktop `1.1.7203` on macOS is installed locally, but it has not been added to the pinned supported matrix yet. When it is evaluated, the result should be recorded here with the tested caller-binding mode.
+- Codex desktop `26.318.11754` (build `1100`) on macOS is installed locally, but it has not been added to the pinned supported matrix yet. When it is evaluated, the result should be recorded here with the tested caller-binding mode.
 - Any client-specific limitations discovered during those manual checks should be recorded here without changing the repository-owned supported matrix until the matrix is intentionally expanded.

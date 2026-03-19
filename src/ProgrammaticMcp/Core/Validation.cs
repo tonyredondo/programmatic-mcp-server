@@ -96,6 +96,37 @@ public static class ApiPathUtilities
 
 internal static class BuilderValidation
 {
+    public static void ValidateCatalogPaths(IReadOnlyList<string> apiPaths)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var namespacePrefixes = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var apiPath in apiPaths)
+        {
+            if (!seen.Add(apiPath))
+            {
+                throw new InvalidOperationException($"API path '{apiPath}' is registered more than once.");
+            }
+
+            if (namespacePrefixes.Contains(apiPath))
+            {
+                throw new InvalidOperationException($"API path '{apiPath}' collides with an existing namespace path.");
+            }
+
+            var segments = apiPath.Split('.');
+            for (var index = 1; index < segments.Length; index++)
+            {
+                var prefix = string.Join('.', segments.Take(index));
+                if (seen.Contains(prefix))
+                {
+                    throw new InvalidOperationException($"API path '{apiPath}' collides with existing leaf path '{prefix}'.");
+                }
+
+                namespacePrefixes.Add(prefix);
+            }
+        }
+    }
+
     public static void ValidateApiPath(string apiPath)
     {
         if (string.IsNullOrWhiteSpace(apiPath) || apiPath.Length > 80)

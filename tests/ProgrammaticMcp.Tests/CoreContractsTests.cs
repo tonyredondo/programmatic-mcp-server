@@ -192,6 +192,72 @@ public sealed class CoreContractsTests
     }
 
     [Fact]
+    public void GeneratedTypeScriptCollisionSuffixesFollowRegistrationOrder()
+    {
+        var catalog = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddCapability<RepeatedContainer, RepeatedContainer>(
+                "fooBar",
+                capability => capability
+                    .WithDescription("Registered first.")
+                    .UseWhen("You need the first capability.")
+                    .DoNotUseWhen("You need the second capability.")
+                    .WithHandler((input, _) => ValueTask.FromResult(input)))
+            .AddCapability<RepeatedContainer, RepeatedContainer>(
+                "foo.bar",
+                capability => capability
+                    .WithDescription("Registered second.")
+                    .UseWhen("You need the second capability.")
+                    .DoNotUseWhen("You need the first capability.")
+                    .WithHandler((input, _) => ValueTask.FromResult(input)))
+            .BuildCatalog();
+
+        Assert.Contains("function fooBar(input: FooBarInput): Promise<FooBarResult>;", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Contains("function bar(input: FooBarInput2): Promise<FooBarResult2>;", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Equal("foo.bar(input: FooBarInput2) -> Promise<FooBarResult2>", catalog.Capabilities[0].Signature);
+        Assert.Equal("fooBar(input: FooBarInput) -> Promise<FooBarResult>", catalog.Capabilities[1].Signature);
+    }
+
+    [Fact]
+    public void CatalogBuildRejectsDuplicateAndNamespaceCollidingApiPaths()
+    {
+        var duplicate = new ProgrammaticMcpBuilder()
+            .AddCapability<EmptyInput, EmptyInput>(
+                "tasks.list",
+                capability => capability
+                    .WithDescription("First.")
+                    .UseWhen("You need the first one.")
+                    .DoNotUseWhen("You need the second one.")
+                    .WithHandler((input, _) => ValueTask.FromResult(input)))
+            .AddCapability<EmptyInput, EmptyInput>(
+                "tasks.list",
+                capability => capability
+                    .WithDescription("Second.")
+                    .UseWhen("You need the second one.")
+                    .DoNotUseWhen("You need the first one.")
+                    .WithHandler((input, _) => ValueTask.FromResult(input)));
+
+        var collision = new ProgrammaticMcpBuilder()
+            .AddCapability<EmptyInput, EmptyInput>(
+                "tasks",
+                capability => capability
+                    .WithDescription("Leaf.")
+                    .UseWhen("You need the leaf.")
+                    .DoNotUseWhen("You need the namespace.")
+                    .WithHandler((input, _) => ValueTask.FromResult(input)))
+            .AddCapability<EmptyInput, EmptyInput>(
+                "tasks.list",
+                capability => capability
+                    .WithDescription("Namespace child.")
+                    .UseWhen("You need the child.")
+                    .DoNotUseWhen("You need the leaf.")
+                    .WithHandler((input, _) => ValueTask.FromResult(input)));
+
+        Assert.Throws<InvalidOperationException>(() => duplicate.BuildCatalog());
+        Assert.Throws<InvalidOperationException>(() => collision.BuildCatalog());
+    }
+
+    [Fact]
     public void SharedExecutionAndEnvelopeContractsReflectPlannedWireShapes()
     {
         var preview = CreateApproval().PreviewEnvelope;
@@ -474,6 +540,8 @@ public sealed class CoreContractsTests
     public sealed record CompleteTaskPreview(string TaskId, bool WillComplete);
 
     public sealed record CompleteTaskApplyResult(string TaskId, string Status);
+
+    public sealed record EmptyInput();
 
     public sealed record SchemaFixture(
         Guid Id,

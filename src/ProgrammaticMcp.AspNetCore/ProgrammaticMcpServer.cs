@@ -899,8 +899,12 @@ internal sealed class ProgrammaticMcpLifecycleService(
         using var timer = new PeriodicTimer(TimeSpan.FromMinutes(5));
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
-            await artifactStore.SweepExpiredAsync(stoppingToken);
-            await approvalStore.SweepExpiredAsync(stoppingToken);
+            if (shutdownCoordinator.IsStopping)
+            {
+                break;
+            }
+
+            await RunMaintenanceCycleAsync(stoppingToken);
         }
     }
 
@@ -920,6 +924,24 @@ internal sealed class ProgrammaticMcpLifecycleService(
         }
 
         return Math.Min(memoryBudgetBytes / 4, fallbackThresholdBytes);
+    }
+
+    private async Task RunMaintenanceCycleAsync(CancellationToken cancellationToken)
+    {
+        if (approvalStore is InMemoryApprovalStore inMemoryApprovalStore)
+        {
+            var recovered = await inMemoryApprovalStore.RecoverStaleApplyingAsync(
+                TimeSpan.FromSeconds(options.StaleApplyingTimeoutSeconds),
+                static approval => approval with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "apply_outcome_unknown" },
+                cancellationToken);
+            if (recovered > 0)
+            {
+                logger.LogInformation("Recovered {RecoveredCount} stale applying approvals during maintenance.", recovered);
+            }
+        }
+
+        await artifactStore.SweepExpiredAsync(cancellationToken);
+        await approvalStore.SweepExpiredAsync(cancellationToken);
     }
 }
 
@@ -1038,10 +1060,11 @@ internal sealed class ProgrammaticMcpToolHandlers(
     private async ValueTask<CallToolResult> HandleExecuteAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
     {
         var args = ParseArguments(context.Params?.Arguments);
-        if (args["conversationId"]?.GetValue<string>() is not { } conversationId)
+        if (!TryReadConversationId(args, out var conversationIdValue, out var error))
         {
-            return CreateToolError("invalid_params", "conversationId is required.");
+            return error!;
         }
+        var conversationId = conversationIdValue!;
 
         if (args["code"]?.GetValue<string>() is not { } code)
         {
@@ -1106,10 +1129,11 @@ internal sealed class ProgrammaticMcpToolHandlers(
     private async ValueTask<CallToolResult> HandleArtifactReadAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
     {
         var args = ParseArguments(context.Params?.Arguments);
-        if (args["conversationId"]?.GetValue<string>() is not { } conversationId)
+        if (!TryReadConversationId(args, out var conversationIdValue, out var error))
         {
-            return CreateToolError("invalid_params", "conversationId is required.");
+            return error!;
         }
+        var conversationId = conversationIdValue!;
 
         if (args["artifactId"]?.GetValue<string>() is not { } artifactId)
         {
@@ -1175,10 +1199,11 @@ internal sealed class ProgrammaticMcpToolHandlers(
     private async ValueTask<CallToolResult> HandleMutationListAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
     {
         var args = ParseArguments(context.Params?.Arguments);
-        if (args["conversationId"]?.GetValue<string>() is not { } conversationId)
+        if (!TryReadConversationId(args, out var conversationIdValue, out var error))
         {
-            return CreateToolError("invalid_params", "conversationId is required.");
+            return error!;
         }
+        var conversationId = conversationIdValue!;
 
         var limit = args["limit"]?.GetValue<int?>() ?? 20;
         if (limit is <= 0 or > 100)
@@ -1250,8 +1275,13 @@ internal sealed class ProgrammaticMcpToolHandlers(
     private async ValueTask<CallToolResult> HandleMutationApplyAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
     {
         var args = ParseArguments(context.Params?.Arguments);
-        if (args["conversationId"]?.GetValue<string>() is not { } conversationId
-            || args["approvalId"]?.GetValue<string>() is not { } approvalId
+        if (!TryReadConversationId(args, out var conversationIdValue, out var error))
+        {
+            return error!;
+        }
+        var conversationId = conversationIdValue!;
+
+        if (args["approvalId"]?.GetValue<string>() is not { } approvalId
             || args["approvalNonce"]?.GetValue<string>() is not { } approvalNonce)
         {
             return CreateToolError("invalid_params", "conversationId, approvalId, and approvalNonce are required.");
@@ -1397,8 +1427,13 @@ internal sealed class ProgrammaticMcpToolHandlers(
     private async ValueTask<CallToolResult> HandleMutationCancelAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
     {
         var args = ParseArguments(context.Params?.Arguments);
-        if (args["conversationId"]?.GetValue<string>() is not { } conversationId
-            || args["approvalId"]?.GetValue<string>() is not { } approvalId
+        if (!TryReadConversationId(args, out var conversationIdValue, out var error))
+        {
+            return error!;
+        }
+        var conversationId = conversationIdValue!;
+
+        if (args["approvalId"]?.GetValue<string>() is not { } approvalId
             || args["approvalNonce"]?.GetValue<string>() is not { } approvalNonce)
         {
             return CreateToolError("invalid_params", "conversationId, approvalId, and approvalNonce are required.");
@@ -1489,6 +1524,30 @@ internal sealed class ProgrammaticMcpToolHandlers(
         }
 
         return result;
+    }
+
+    private CallToolResult CreateInvalidConversationIdError(bool missing)
+        => CreateToolError("invalid_params", missing ? "conversationId is required." : "conversationId is invalid.");
+
+    private bool TryReadConversationId(JsonObject args, out string? conversationId, out CallToolResult? error)
+    {
+        if (args["conversationId"]?.GetValue<string>() is not { } value)
+        {
+            conversationId = null;
+            error = CreateInvalidConversationIdError(missing: true);
+            return false;
+        }
+
+        if (!ConversationIdValidator.IsValid(value))
+        {
+            conversationId = null;
+            error = CreateInvalidConversationIdError(missing: false);
+            return false;
+        }
+
+        conversationId = value;
+        error = null;
+        return true;
     }
 
     private CallToolResult CreateSuccess<T>(T payload)

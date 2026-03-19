@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Reflection;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
@@ -533,6 +534,21 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         Assert.Equal("invalid_params", ParseStructuredContent(invalidArtifactRead)["error"]!["code"]!.GetValue<string>());
     }
 
+    [Theory]
+    [MemberData(nameof(InvalidConversationIdCases))]
+    public async Task ConversationScopedToolsRejectInvalidConversationIdsAtTheToolBoundary(string toolName, Dictionary<string, object?> arguments)
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync();
+        await using var client = await host.CreateSessionClientAsync();
+
+        var result = await client.CallToolAsync(toolName, arguments);
+        var node = ParseStructuredContent(result);
+
+        Assert.True(result.IsError ?? false, node.ToJsonString());
+        Assert.Equal("invalid_params", node["error"]!["code"]!.GetValue<string>());
+        Assert.Equal("conversationId is invalid.", node["error"]!["message"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task StartupRecoveryMarksStaleApplyingApprovalsBeforeServing()
     {
@@ -545,6 +561,33 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
 
         var recovered = Assert.Single(await seededStore.ListAllAsync());
         Assert.Equal(ApprovalState.FailedTerminal, recovered.State);
+        Assert.Equal("apply_outcome_unknown", recovered.FailureCode);
+    }
+
+    [Fact]
+    public async Task MaintenanceSweepRecoversStaleApplyingApprovals()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync();
+        var store = (InMemoryApprovalStore)host.Services.GetRequiredService<IApprovalStore>();
+        var approval = CreateApplyingApproval("conv-maintenance", "caller-maintenance", "tasks.complete") with
+        {
+            ApprovalId = "00000000-0000-0000-0000-00000000aa01",
+            ApplyingSinceUtc = DateTimeOffset.UtcNow.AddMinutes(-5)
+        };
+        await store.CreateAsync(approval);
+
+        var lifecycle = host.Services
+            .GetServices<IHostedService>()
+            .Single(service => service.GetType().Name == "ProgrammaticMcpLifecycleService");
+        var method = lifecycle.GetType().GetMethod("RunMaintenanceCycleAsync", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var task = (Task)method!.Invoke(lifecycle, [CancellationToken.None])!;
+        await task;
+
+        var recovered = await store.GetAsync(approval.ApprovalId);
+        Assert.NotNull(recovered);
+        Assert.Equal(ApprovalState.FailedTerminal, recovered!.State);
         Assert.Equal("apply_outcome_unknown", recovered.FailureCode);
     }
 
@@ -908,6 +951,56 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     {
         Assert.True(result.StructuredContent.HasValue);
         return JsonNode.Parse(result.StructuredContent.Value.GetRawText())!.AsObject();
+    }
+
+    public static IEnumerable<object[]> InvalidConversationIdCases()
+    {
+        yield return
+        [
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "bad/id",
+                ["code"] = "async function main() { return 1; }"
+            }
+        ];
+        yield return
+        [
+            "artifact.read",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "bad/id",
+                ["artifactId"] = "artifact-1"
+            }
+        ];
+        yield return
+        [
+            "mutation.list",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "bad/id"
+            }
+        ];
+        yield return
+        [
+            "mutation.apply",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "bad/id",
+                ["approvalId"] = "approval-1",
+                ["approvalNonce"] = "nonce"
+            }
+        ];
+        yield return
+        [
+            "mutation.cancel",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "bad/id",
+                ["approvalId"] = "approval-1",
+                ["approvalNonce"] = "nonce"
+            }
+        ];
     }
 
     private static PendingApproval CreateApplyingApproval(string conversationId, string callerBindingId, string mutationName)

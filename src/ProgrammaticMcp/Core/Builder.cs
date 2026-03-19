@@ -64,17 +64,21 @@ public sealed class ProgrammaticMcpBuilder
         }
 
         var schemaGenerator = new BuiltInSchemaGenerator();
-        var capabilities = _registrations
+        var registeredCapabilities = _registrations
             .Select(registration => registration.BuildDefinition(schemaGenerator))
-            .OrderBy(static capability => capability.ApiPath, StringComparer.Ordinal)
             .ToArray();
+        BuilderValidation.ValidateCatalogPaths(registeredCapabilities.Select(static capability => capability.ApiPath).ToArray());
 
-        var namingPlan = TypeScriptNamingPlan.Create(capabilities);
-        foreach (var capability in capabilities)
+        var namingPlan = TypeScriptNamingPlan.Create(registeredCapabilities);
+        foreach (var capability in registeredCapabilities)
         {
             var names = namingPlan.Get(capability.ApiPath);
             capability.Signature = SignatureFormatter.Format(capability.ApiPath, names.InputTypeName, names.ResultTypeName);
         }
+
+        var capabilities = registeredCapabilities
+            .OrderBy(static capability => capability.ApiPath, StringComparer.Ordinal)
+            .ToArray();
 
         var generatedTypeScript = TypeScriptDeclarationGenerator.Generate(capabilities, namingPlan);
         var capabilityVersion = CapabilityVersionCalculator.Calculate(capabilities, generatedTypeScript);
