@@ -24,7 +24,7 @@ Use this package when you want the built-in constrained JavaScript execution mod
 
 Before changing the pinned Jint version:
 
-1. rerun the Phase 1.5 runtime proof tests
-2. rerun the Phase 3 executor suite
+1. rerun the runtime proof tests
+2. rerun the executor suite
 3. verify syntax-error mapping, cancellation, `Promise.all(...)`, and bridge serialization behavior
 4. confirm no `capabilityVersion` or declaration drift from the same catalog input

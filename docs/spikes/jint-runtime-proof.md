@@ -1,18 +1,18 @@
-# Phase 1.5 Runtime Proof Spike
+# Jint Runtime Proof
 
 ## Status
 
 Passed.
 
-## Exact Jint Version Pinned For The Spike
+## Exact Jint Version Pinned For The Proof
 
 - `Jint` `4.6.3`
 
 This version is pinned in [Directory.Packages.props](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/Directory.Packages.props).
 
-## What The Spike Proved
+## What The Proof Covered
 
-The spike harness in [RuntimeProofHarness.cs](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/src/ProgrammaticMcp.Jint/Spike/RuntimeProofHarness.cs) and the tests in [RuntimeProofHarnessTests.cs](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/tests/ProgrammaticMcp.Jint.Tests/RuntimeProofHarnessTests.cs) verified:
+The harness in [RuntimeProofHarness.cs](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/src/ProgrammaticMcp.Jint/Spike/RuntimeProofHarness.cs) and the tests in [RuntimeProofHarnessTests.cs](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/tests/ProgrammaticMcp.Jint.Tests/RuntimeProofHarnessTests.cs) verified:
 
 - async entrypoints can return awaited values correctly
 - explicit promise unwrapping works through `UnwrapIfPromiseAsync`
@@ -23,9 +23,7 @@ The spike harness in [RuntimeProofHarness.cs](/Users/tony.redondo/repos/github/t
 
 ## Decision
 
-The planned async runtime profile remains valid for the next phase.
-
-Phase 2 can continue without switching to the documented sync-only fallback profile.
+The async runtime profile remains valid and does not need to fall back to a sync-only execution model.
 
 ## Verification Commands
 
@@ -34,7 +32,7 @@ Phase 2 can continue without switching to the documented sync-only fallback prof
 
 ## Source Confirmation
 
-The Jint async and promise APIs used by this spike were confirmed from official sources:
+The Jint async and promise APIs used by this proof were confirmed from official sources:
 
 - [Jint NuGet package 4.6.3](https://www.nuget.org/packages/Jint)
 - [Jint README async execution section](https://github.com/sebastienros/jint)

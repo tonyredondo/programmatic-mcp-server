@@ -56,7 +56,7 @@ The implementation plan is organized around three library packages and one sampl
 
 ## Important V0 Constraints
 
-The current plan is intentionally narrow:
+The current implementation is intentionally narrow:
 
 - the built-in Jint runtime is a constrained convenience sandbox, not a hostile multi-tenant isolation boundary
 - the first transport is HTTP/ASP.NET Core, not every MCP transport
@@ -180,6 +180,4 @@ That policy is only meant for local browser tooling. It is not a production defa
 
 ## Status
 
-The repository now includes the solution bootstrap, core contracts, Jint runtime, ASP.NET Core transport, and the sample reference server. The implementation spec still lives in [INITIAL_PLAN.md](INITIAL_PLAN.md).
-
-If the README and the plan ever disagree, treat [INITIAL_PLAN.md](INITIAL_PLAN.md) as the source of truth for v0 scope and contract decisions.
+The repository now includes the solution bootstrap, core contracts, the Jint runtime, the ASP.NET Core transport, packaging, and the sample reference server. The current behavior is defined by the shipped code, tests, and public documentation in this repository.

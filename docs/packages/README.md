@@ -1,6 +1,6 @@
 # Package Docs
 
-This directory contains the package-level reference notes used during Phase 6 hardening.
+This directory contains the package-level reference notes for the shipped library packages.
 
 - [ProgrammaticMcp](./ProgrammaticMcp.md)
 - [ProgrammaticMcp.Jint](./ProgrammaticMcp.Jint.md)

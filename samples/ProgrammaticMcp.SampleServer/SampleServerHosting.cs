@@ -55,7 +55,7 @@ public static class SampleServerHosting
                 new
                 {
                     project = "ProgrammaticMcp.SampleServer",
-                    phase = "Phase 5 sample server",
+                    surface = "sample server",
                     status = "ready",
                     endpoints = new
                     {

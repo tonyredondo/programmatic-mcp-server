@@ -15,9 +15,9 @@ In this repository, "programmatic MCP" means:
 
 ## Source Of Truth
 
-- [INITIAL_PLAN.md](INITIAL_PLAN.md) is the source of truth for v0 scope, contracts, defaults, and constraints.
-- Do not invent behavior that is not defined there when implementing the library.
-- If implementation work forces a contract change, update the plan first or in the same change.
+- The shipped code, tests, and public documentation in this repository are the source of truth for current behavior.
+- Do not invent behavior that is not supported by those contracts and docs when implementing the library.
+- If implementation work changes public behavior, update the code, tests, and docs together in the same change.
 
 ## Working Rules
 
@@ -26,7 +26,7 @@ In this repository, "programmatic MCP" means:
 - Keep transport-specific behavior in adapters, not in the core abstractions.
 - Keep the exposed runtime surface narrow, explicit, and schema-driven.
 - Prefer structured diagnostics and explicit contracts over implicit behavior.
-- Keep docs, tests, and samples aligned with the plan when behavior changes.
+- Keep docs, tests, and samples aligned with the implemented behavior when it changes.
 
 ## V0 Direction
 

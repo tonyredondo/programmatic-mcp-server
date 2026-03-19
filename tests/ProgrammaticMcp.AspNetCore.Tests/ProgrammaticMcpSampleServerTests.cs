@@ -20,7 +20,7 @@ public sealed class ProgrammaticMcpSampleServerTests
         var health = await client.GetAsync("/mcp/health");
 
         Assert.NotNull(root);
-        Assert.Equal("Phase 5 sample server", root!["phase"]!.GetValue<string>());
+        Assert.Equal("sample server", root!["surface"]!.GetValue<string>());
         Assert.Equal("/mcp", root["endpoints"]!["mcp"]!.GetValue<string>());
         Assert.Equal("/mcp/types", root["endpoints"]!["types"]!.GetValue<string>());
         Assert.Equal("/mcp/health", root["endpoints"]!["health"]!.GetValue<string>());

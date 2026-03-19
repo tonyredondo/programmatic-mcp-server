@@ -35,7 +35,7 @@ public static class JsonSchemaValidator
 
         if (schemaObject.TryGetPropertyValue("$ref", out var referenceNode))
         {
-            throw new JsonSchemaValidationException($"References are not supported by the phase-2 validator at {path}: {referenceNode}.");
+            throw new JsonSchemaValidationException($"References are not supported by this validator at {path}: {referenceNode}.");
         }
 
         var declaredTypes = ReadTypes(schemaObject);
