@@ -9,6 +9,7 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" />
@@ -17,6 +18,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\samples\ProgrammaticMcp.SampleServer\ProgrammaticMcp.SampleServer.csproj" />
     <ProjectReference Include="..\..\src\ProgrammaticMcp\ProgrammaticMcp.csproj" />
     <ProjectReference Include="..\..\src\ProgrammaticMcp.Jint\ProgrammaticMcp.Jint.csproj" />
     <ProjectReference Include="..\..\src\ProgrammaticMcp.AspNetCore\ProgrammaticMcp.AspNetCore.csproj" />

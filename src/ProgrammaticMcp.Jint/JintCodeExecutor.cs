@@ -800,7 +800,9 @@ public sealed class JintCodeExecutor : ICodeExecutor
 
         public void Dispose()
         {
-            _gate.Dispose();
+            // The bridge can still be unwinding an in-flight host call when the outer executor
+            // reaches disposal after cancellation or shutdown. Disposing the semaphore here
+            // creates a race with the pending Release() in InvokeAsync().
         }
 
         private async Task<HostCallResponse> InvokeCapabilityAsync(CapabilityDefinition capability, JsonObject input)

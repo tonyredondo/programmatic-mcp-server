@@ -1,6 +1,6 @@
 # Programmatic MCP Server
 
-`Programmatic MCP Server` is a planned .NET library for building MCP servers that are meant to be used through generated code, not only through direct tool calls.
+`Programmatic MCP Server` is a .NET library for building MCP servers that are meant to be used through generated code, not only through direct tool calls.
 
 The idea is inspired by:
 
@@ -64,8 +64,122 @@ The current plan is intentionally narrow:
 - built-in artifact and approval stores are in-memory by default
 - authn/authz policy remains host-driven; the library requires explicit authorization decisions for mutation flows
 
+## Running The Sample Server
+
+The repository includes a runnable reference server at `samples/ProgrammaticMcp.SampleServer`.
+
+Start it with:
+
+```bash
+dotnet run --project samples/ProgrammaticMcp.SampleServer
+```
+
+The sample exposes:
+
+- `GET /`
+- `POST /mcp`
+- `GET /mcp/types`
+- `GET /mcp/health`
+
+The sample domain is intentionally small and in-memory. It exposes these exact capabilities:
+
+- `projects.list`
+- `tasks.list`
+- `tasks.getById`
+- `tasks.exportReport`
+- `tasks.complete`
+
+## Sample Flow
+
+The full transcript lives in [docs/sample-transcript.md](docs/sample-transcript.md). The short version is:
+
+1. Discover capabilities with `capabilities.search`.
+2. Execute generated code with `code.execute`.
+3. Read spilled report output with `artifact.read`.
+4. Preview, list, and apply a mutation with `code.execute`, `mutation.list`, and `mutation.apply`.
+
+Example `code.execute` body:
+
+```json
+{
+  "conversationId": "sample-read",
+  "code": "async function main() { return await programmatic.tasks.getById({ taskId: 'task-1' }); }"
+}
+```
+
+Example report-spill execution:
+
+```json
+{
+  "conversationId": "sample-report",
+  "maxResultBytes": 256,
+  "code": "async function main() { return await programmatic.tasks.exportReport({ projectId: 'project-alpha' }); }"
+}
+```
+
+Follow that with `artifact.read`:
+
+```json
+{
+  "conversationId": "sample-report",
+  "artifactId": "<resultArtifactId>",
+  "limit": 1
+}
+```
+
+Example mutation preview:
+
+```json
+{
+  "conversationId": "sample-complete",
+  "code": "async function main() { return await programmatic.tasks.complete({ taskId: 'task-1' }); }"
+}
+```
+
+List pending approvals for the conversation:
+
+```json
+{
+  "conversationId": "sample-complete"
+}
+```
+
+Apply the approved mutation:
+
+```json
+{
+  "conversationId": "sample-complete",
+  "approvalId": "<approvalId>",
+  "approvalNonce": "<approvalNonce>"
+}
+```
+
+The sample also includes a rejected mutation path: trying to complete `task-3` returns a preview, but `mutation.apply` fails with `validation_failed` because the task is already completed.
+
+## Health And CORS
+
+The sample maps health checks at `/mcp/health`.
+
+The library does not enable CORS automatically. The sample keeps browser-oriented CORS disabled by default and documents a safe localhost-only option through configuration:
+
+```json
+{
+  "SampleServer": {
+    "Cors": {
+      "EnableBrowserTooling": true,
+      "AllowedOrigins": [
+        "http://127.0.0.1:3000",
+        "http://localhost:3000"
+      ]
+    }
+  }
+}
+```
+
+That policy is only meant for local browser tooling. It is not a production default.
+
 ## Status
 
-This repository is still in the planning stage. The implementation spec lives in [INITIAL_PLAN.md](INITIAL_PLAN.md).
+The repository now includes the solution bootstrap, core contracts, Jint runtime, ASP.NET Core transport, and the sample reference server. The implementation spec still lives in [INITIAL_PLAN.md](INITIAL_PLAN.md).
 
 If the README and the plan ever disagree, treat [INITIAL_PLAN.md](INITIAL_PLAN.md) as the source of truth for v0 scope and contract decisions.

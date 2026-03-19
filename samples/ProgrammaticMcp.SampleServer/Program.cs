@@ -1,14 +1,11 @@
-var builder = WebApplication.CreateBuilder(args);
-var app = builder.Build();
+using ProgrammaticMcp.SampleServer;
 
-app.MapGet(
-    "/",
-    () => Results.Ok(
-        new
-        {
-            project = "ProgrammaticMcp.SampleServer",
-            phase = "Phase 1 bootstrap",
-            status = "ready"
-        }));
+var builder = WebApplication.CreateBuilder(args);
+SampleServerHosting.ConfigureServices(builder);
+
+var app = builder.Build();
+SampleServerHosting.ConfigureApp(app);
 
 app.Run();
+
+public partial class Program;
