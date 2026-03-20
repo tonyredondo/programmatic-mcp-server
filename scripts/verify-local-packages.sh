@@ -17,11 +17,15 @@ require_command() {
   fi
 }
 
+grep_extended() {
+  grep -E "$@"
+}
+
 read_zip_entry() {
   local archive="$1"
   local pattern="$2"
   local entry
-  entry="$(zipinfo -1 "$archive" | rg "$pattern" | head -n 1 || true)"
+  entry="$(zipinfo -1 "$archive" | grep_extended "$pattern" | head -n 1 || true)"
   if [[ -z "$entry" ]]; then
     echo "Missing archive entry matching '$pattern' in $archive" >&2
     exit 1
@@ -42,7 +46,7 @@ verify_package_metadata() {
   local nuspec
   nuspec="$(read_zip_entry "$package_file" '\.nuspec$')"
   local readme_path
-  readme_path="$(printf '%s' "$nuspec" | rg -o '<readme>[^<]+</readme>' | sed -E 's#</?readme>##g')"
+  readme_path="$(printf '%s' "$nuspec" | grep_extended -o '<readme>[^<]+</readme>' | sed -E 's#</?readme>##g')"
 
   if [[ -z "$readme_path" ]]; then
     echo "Package $package_name is missing nuspec <readme> metadata." >&2
@@ -59,7 +63,7 @@ verify_package_metadata() {
     exit 1
   }
 
-  printf '%s' "$nuspec" | rg -q '<description>.+</description>' || {
+  printf '%s' "$nuspec" | grep_extended -q '<description>.+</description>' || {
     echo "Package $package_name is missing nuspec description metadata." >&2
     exit 1
   }
@@ -69,14 +73,13 @@ verify_package_metadata() {
     exit 1
   }
 
-  zipinfo -1 "$package_file" | rg -q '^lib/.+\.xml$' || {
+  zipinfo -1 "$package_file" | grep_extended -q '^lib/.+\.xml$' || {
     echo "Package $package_name is missing XML documentation output." >&2
     exit 1
   }
 }
 
 require_command dotnet
-require_command rg
 require_command unzip
 require_command zipinfo
 
