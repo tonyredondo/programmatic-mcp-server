@@ -239,6 +239,9 @@ public sealed class ProgrammaticMcpSampleServerTests
     {
         private int _nextId = 1;
         private string _protocolVersion = "2024-11-05";
+        private readonly string? _defaultOrigin = client.BaseAddress is not null
+            ? new Uri(client.BaseAddress, "/").GetLeftPart(UriPartial.Authority)
+            : null;
 
         public async Task InitializeAsync(CancellationToken cancellationToken = default)
         {
@@ -293,7 +296,10 @@ public sealed class ProgrammaticMcpSampleServerTests
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
             request.Headers.TryAddWithoutValidation("MCP-Protocol-Version", _protocolVersion);
-
+            if (!string.IsNullOrWhiteSpace(_defaultOrigin))
+            {
+                request.Headers.TryAddWithoutValidation("Origin", _defaultOrigin);
+            }
             using var response = await client.SendAsync(request, cancellationToken);
             response.EnsureSuccessStatusCode();
             var body = await response.Content.ReadAsStringAsync(cancellationToken);

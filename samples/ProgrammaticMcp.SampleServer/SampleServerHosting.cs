@@ -34,6 +34,7 @@ public static class SampleServerHosting
             {
                 options.ServerName = "ProgrammaticMcp.SampleServer";
                 options.ServerVersion = "0.1.0";
+                options.EnableStatefulHttpTransport = false;
                 options.AllowInsecureDevelopmentCookies = ShouldAllowInsecureDevelopmentCookies(builder);
                 options.EnableSignedHeaderCallerBinding = true;
                 options.Builder.AllowAllBoundCallers();

@@ -277,7 +277,8 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     [Fact]
     public async Task RawCookieFallbackSetsRouteScopedCookieAndSupportsReconnectMutationFlow()
     {
-        await using var host = await ProgrammaticMcpTestHost.StartAsync();
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.EnableStatefulHttpTransport = false);
 
         var cookieContainer = new CookieContainer();
         await using var rawClient = host.CreateRawClient(cookieContainer: cookieContainer);
@@ -344,7 +345,8 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     [Fact]
     public async Task RawCookieFallbackRejectsCrossOriginMutationRequests()
     {
-        await using var host = await ProgrammaticMcpTestHost.StartAsync();
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.EnableStatefulHttpTransport = false);
         var cookieContainer = new CookieContainer();
         await using var rawClient = host.CreateRawClient(cookieContainer: cookieContainer);
         await rawClient.InitializeAsync();
@@ -368,9 +370,37 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     }
 
     [Fact]
+    public async Task RawCookieFallbackRejectsRequestsWithoutOriginOrReferer()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.EnableStatefulHttpTransport = false);
+        var cookieContainer = new CookieContainer();
+        await using var rawClient = host.CreateRawClient(cookieContainer: cookieContainer, includeDefaultOrigin: false);
+        await rawClient.InitializeAsync();
+
+        var response = await rawClient.CallToolAsync(
+            "code.execute",
+            new JsonObject
+            {
+                ["conversationId"] = "conv-missing-origin",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.complete({ taskId: "blocked" });
+                           }
+                           """
+            });
+
+        Assert.True(response.IsError, response.Body.ToJsonString());
+        Assert.Equal("permission_denied", response.StructuredContent["error"]!["code"]!.GetValue<string>());
+        Assert.Equal("origin_validation_failed", response.StructuredContent["error"]!["data"]!["reason"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task RawSignedHeaderFallbackSupportsReconnectMutationFlow()
     {
-        await using var host = await ProgrammaticMcpTestHost.StartAsync(enableSignedHeader: true);
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            enableSignedHeader: true,
+            configureOptions: options => options.EnableStatefulHttpTransport = false);
         var token = host.Services.GetRequiredService<IProgrammaticCallerBindingTokenService>().CreateSignedHeaderToken("header-client-1");
 
         await using var rawClient = host.CreateRawClient(signedHeaderToken: token);
@@ -848,7 +878,11 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     public async Task ApprovalSnapshotsEvictOldCursorsWhenThePerCallerLimitIsExceeded()
     {
         await using var host = await ProgrammaticMcpTestHost.StartAsync(
-            configureOptions: options => options.MaxApprovalListSnapshotsPerCallerBinding = 2);
+            configureOptions: options =>
+            {
+                options.EnableStatefulHttpTransport = false;
+                options.MaxApprovalListSnapshotsPerCallerBinding = 2;
+            });
         var cookieContainer = new CookieContainer();
         await using var client = host.CreateRawClient(cookieContainer: cookieContainer);
         await client.InitializeAsync();
@@ -916,6 +950,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         await using var mirroredHost = await ProgrammaticMcpTestHost.StartAsync(
             configureOptions: options =>
             {
+                options.EnableStatefulHttpTransport = false;
                 options.EnableCompatibilityTextMirroring = true;
                 options.CompatibilityTextMirrorMaxBytes = 512;
             });
@@ -980,6 +1015,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     {
         var probe = new CancellationProbe();
         await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.EnableStatefulHttpTransport = false,
             configureServices: services => services.AddSingleton(probe),
             configureCatalog: catalog =>
             {
@@ -1039,6 +1075,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         using var loggerProvider = new TestLoggerProvider();
 
         await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.EnableStatefulHttpTransport = false,
             configureServices: services =>
             {
                 services.AddSingleton(gate);
@@ -1108,7 +1145,11 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         var probe = new CancellationProbe();
 
         await using var host = await ProgrammaticMcpTestHost.StartAsync(
-            configureOptions: options => options.GracefulShutdownTimeout = TimeSpan.FromMilliseconds(100),
+            configureOptions: options =>
+            {
+                options.EnableStatefulHttpTransport = false;
+                options.GracefulShutdownTimeout = TimeSpan.FromMilliseconds(100);
+            },
             includeDefaultCatalog: false,
             configureServices: services => services.AddSingleton(probe),
             configureCatalog: catalog =>
@@ -1393,7 +1434,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
             return await McpClient.CreateAsync(transport);
         }
 
-        public RawMcpClient CreateRawClient(CookieContainer? cookieContainer = null, string? signedHeaderToken = null)
+        public RawMcpClient CreateRawClient(CookieContainer? cookieContainer = null, string? signedHeaderToken = null, bool includeDefaultOrigin = true)
         {
             var handler = new HttpClientHandler
             {
@@ -1411,7 +1452,10 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
                 client.DefaultRequestHeaders.Add(ProgrammaticMcpServerOptions.DefaultSignedHeaderName, signedHeaderToken);
             }
 
-            return new RawMcpClient(client, McpPath);
+            var defaultOrigin = includeDefaultOrigin && client.BaseAddress is not null
+                ? new Uri(client.BaseAddress, "/").GetLeftPart(UriPartial.Authority)
+                : null;
+            return new RawMcpClient(client, McpPath, defaultOrigin);
         }
 
         public Task StopAsync()
@@ -1473,13 +1517,15 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     {
         private readonly HttpClient _client;
         private readonly string _mcpPath;
+        private readonly string? _defaultOrigin;
         private int _nextId = 1;
         private string _protocolVersion = "2024-11-05";
 
-        public RawMcpClient(HttpClient client, string mcpPath)
+        public RawMcpClient(HttpClient client, string mcpPath, string? defaultOrigin = null)
         {
             _client = client;
             _mcpPath = mcpPath;
+            _defaultOrigin = defaultOrigin;
         }
 
         public async Task<RawMcpResponse> InitializeAsync(CancellationToken cancellationToken = default)
@@ -1526,6 +1572,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
             request.Headers.TryAddWithoutValidation("MCP-Protocol-Version", _protocolVersion);
+            origin ??= _defaultOrigin;
             if (!string.IsNullOrWhiteSpace(origin))
             {
                 request.Headers.TryAddWithoutValidation("Origin", origin);

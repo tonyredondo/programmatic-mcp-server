@@ -51,6 +51,9 @@ public sealed class ProgrammaticMcpServerOptions
     /// <summary>Gets or sets the default route prefix used when mapping the server.</summary>
     public string RoutePrefix { get; internal set; } = "/mcp";
 
+    /// <summary>Gets or sets whether the HTTP MCP transport should keep server-side sessions.</summary>
+    public bool EnableStatefulHttpTransport { get; set; } = true;
+
     /// <summary>Gets or sets the relative path segment used for the generated TypeScript endpoint.</summary>
     public string TypeEndpointSegment { get; set; } = DefaultTypeEndpointSegment;
 
@@ -233,7 +236,7 @@ public static class ProgrammaticMcpServiceCollectionExtensions
             .WithHttpTransport(
                 transportOptions =>
                 {
-                    transportOptions.Stateless = true;
+                    transportOptions.Stateless = !options.EnableStatefulHttpTransport;
                     transportOptions.ConfigureSessionOptions = async (httpContext, serverOptions, cancellationToken) =>
                     {
                         var routeState = httpContext.RequestServices.GetRequiredService<ProgrammaticMcpRouteState>();
@@ -569,7 +572,7 @@ internal sealed class ProgrammaticCallerBindingResolver(
             return new CallerBindingResolution(principalIdentity, "principal", null);
         }
 
-        var sessionIdentity = GetTrustedSessionIdentity(context);
+        var sessionIdentity = GetTrustedSessionIdentity(context, httpContext);
         if (!string.IsNullOrWhiteSpace(sessionIdentity))
         {
             return new CallerBindingResolution(sessionIdentity, "session", null);
@@ -643,6 +646,12 @@ internal sealed class ProgrammaticCallerBindingResolver(
             return ValueTask.CompletedTask;
         }
 
+        var sessionIdentity = httpContext.Request.Headers[ProgrammaticMcpServerOptions.McpSessionIdHeaderName].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(sessionIdentity))
+        {
+            return ValueTask.CompletedTask;
+        }
+
         if (options.EnableSignedHeaderCallerBinding
             && httpContext.Request.Headers.TryGetValue(options.SignedHeaderName, out var headerValues)
             && !string.IsNullOrWhiteSpace(headerValues.FirstOrDefault()))
@@ -698,7 +707,7 @@ internal sealed class ProgrammaticCallerBindingResolver(
 
         if (string.IsNullOrWhiteSpace(origin) && string.IsNullOrWhiteSpace(referer))
         {
-            return;
+            throw new InvalidOperationException("Same-origin validation failed for cookie-bound caller binding.");
         }
 
         if (!string.IsNullOrWhiteSpace(origin) && IsSameOrigin(httpContext, origin))
@@ -729,9 +738,9 @@ internal sealed class ProgrammaticCallerBindingResolver(
     private bool RouteMatches(ProtectedCallerBindingToken token)
         => string.Equals(token.RoutePrefix, options.RoutePrefix, StringComparison.Ordinal);
 
-    private static string? GetTrustedSessionIdentity(MessageContext context)
+    private static string? GetTrustedSessionIdentity(MessageContext context, HttpContext? httpContext)
     {
-        return context.JsonRpcMessage.Context?.RelatedTransport?.SessionId;
+        return context.Server?.SessionId;
     }
 
     private static ProtectedCallerBindingToken? Unprotect(string value, IDataProtector protector, string expectedPurpose)

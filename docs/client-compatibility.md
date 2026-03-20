@@ -9,8 +9,8 @@ The following client paths are validated by automated tests in this repository:
 | Client | Transport | Caller Binding | Version / Build | OS | Validation Status |
 | --- | --- | --- | --- | --- | --- |
 | Repository .NET MCP SDK harness | HTTP MCP via `ModelContextProtocol` | Session identity | `ModelContextProtocol` `1.1.0` on `.NET` runtime `10.0.1` via SDK `10.0.101` | GitHub Actions `ubuntu-24.04` | Validated |
-| Repository raw HTTP harness | Sessionless HTTP MCP | Cookie fallback | `ProgrammaticMcp.AspNetCore.Tests.RawMcpClient` from this repository on `.NET` runtime `10.0.1` via SDK `10.0.101` | GitHub Actions `ubuntu-24.04` | Validated |
-| Repository raw HTTP harness | Sessionless HTTP MCP | Signed header fallback | `ProgrammaticMcp.AspNetCore.Tests.RawMcpClient` from this repository on `.NET` runtime `10.0.1` via SDK `10.0.101` | GitHub Actions `ubuntu-24.04` | Validated |
+| Repository raw HTTP harness | Stateless HTTP MCP | Cookie fallback | `ProgrammaticMcp.AspNetCore.Tests.RawMcpClient` from this repository on `.NET` runtime `10.0.1` via SDK `10.0.101` | GitHub Actions `ubuntu-24.04` | Validated |
+| Repository raw HTTP harness | Stateless HTTP MCP | Signed header fallback | `ProgrammaticMcp.AspNetCore.Tests.RawMcpClient` from this repository on `.NET` runtime `10.0.1` via SDK `10.0.101` | GitHub Actions `ubuntu-24.04` | Validated |
 
 Validation coverage for the repository harness includes:
 
@@ -34,7 +34,7 @@ Validation coverage for the repository harness includes:
 
 - The built-in cookie fallback is intended for HTTP MCP clients that preserve cookies across reconnects.
 - The built-in signed-header fallback is intended for non-cookie HTTP clients that can be provisioned with a stable `X-Programmatic-Mcp-Caller-Binding` token out of band.
-- The repository test harness validates both fallback paths through a sessionless raw HTTP client and also validates the normal sessioned C# MCP SDK client path.
+- The repository test harness validates both fallback paths through a stateless raw HTTP client, and it also validates the normal sessioned C# MCP SDK client path.
 - The signed-header bootstrap path is host-owned: the host generates a stable token through `IProgrammaticCallerBindingTokenService.CreateSignedHeaderToken(...)` and provisions it to the client out of band before the client reconnects with `X-Programmatic-Mcp-Caller-Binding`.
 - The built-in cookie fallback issues a route-scoped, `HttpOnly`, `SameSite=Lax` cookie and enforces same-origin checks on any MCP request that resolves caller binding from that cookie.
 - Browser-style CORS configuration remains host-owned. The library does not enable CORS automatically.
