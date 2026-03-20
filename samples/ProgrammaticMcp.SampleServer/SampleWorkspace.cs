@@ -66,6 +66,19 @@ public sealed class SampleWorkspace
         }
     }
 
+    public string? GetCurrentOpenTaskId()
+    {
+        lock (_gate)
+        {
+            return _tasks.Values
+                .Where(task => !task.IsCompleted)
+                .OrderBy(static task => task.ProjectId, StringComparer.Ordinal)
+                .ThenBy(static task => task.Title, StringComparer.Ordinal)
+                .Select(static task => task.TaskId)
+                .FirstOrDefault();
+        }
+    }
+
     public TaskDetailsResult GetTaskById(TaskByIdInput input)
     {
         lock (_gate)

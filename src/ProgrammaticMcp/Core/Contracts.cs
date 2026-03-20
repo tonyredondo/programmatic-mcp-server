@@ -729,8 +729,18 @@ internal static class CapabilitySearchEngine
                 capability.Result.Schema.DeepClone(),
                 capability.PreviewPayloadSchema?.DeepClone(),
                 capability.ApplyResultSchema?.DeepClone(),
-                capability.Examples,
-                capability.UsageGuidance)
+                capability.Examples
+                    .Select(static example => new CapabilityExample(
+                        example.Description,
+                        example.Input?.DeepClone(),
+                        example.Result?.DeepClone()))
+                    .ToArray(),
+                capability.UsageGuidance is null
+                    ? null
+                    : new CapabilityUsageGuidance(
+                        capability.UsageGuidance.UseWhen.ToArray(),
+                        capability.UsageGuidance.DoNotUseWhen.ToArray(),
+                        capability.UsageGuidance.Notes.ToArray()))
         };
     }
 

@@ -115,6 +115,24 @@ public sealed class JintCodeExecutorTests
     }
 
     [Fact]
+    public async Task ReadOnlyExecutionsDoNotEmitMutationWarningsWhenNoMutationIsInvoked()
+    {
+        var fixture = CreateFixture();
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return await programmatic.math.double({ value: 21 });
+                }
+                """));
+
+        Assert.Equal("42", CanonicalJson.Serialize(result.Result));
+        Assert.Empty(result.Diagnostics);
+    }
+
+    [Fact]
     public async Task UnknownCapabilitySuggestionsStayInsideTheVisibleSubset()
     {
         var fixture = CreateFixture();
@@ -480,6 +498,43 @@ public sealed class JintCodeExecutorTests
                 """,
                 VisibleApiPaths: new[] { "math.double" }));
         Assert.Equal("42", CanonicalJson.Serialize(secondResult.Result));
+    }
+
+    [Fact]
+    public async Task ExternalCancellationIsReportedSeparatelyFromTimeouts()
+    {
+        var fixture = CreateFixture(
+            configureBuilder: builder =>
+                builder.AddCapability<DelayInput, int>(
+                    "runtime.wait",
+                    capability => capability
+                        .WithDescription("Waits for a delay.")
+                        .UseWhen("You need to test cancellation handling.")
+                        .DoNotUseWhen("You need fast results.")
+                        .WithHandler(async (input, context) =>
+                        {
+                            await Task.Delay(TimeSpan.FromMilliseconds(input.DelayMs), context.CancellationToken);
+                            return input.DelayMs;
+                        })),
+            options: new JintExecutorOptions
+            {
+                TimeoutMs = 5_000
+            });
+
+        using var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return await programmatic.runtime.wait({ delayMs: 5000 });
+                }
+                """),
+            cancellationTokenSource.Token);
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "execution_cancelled");
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "timeout");
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "execution_failed");
     }
 
     [Fact]

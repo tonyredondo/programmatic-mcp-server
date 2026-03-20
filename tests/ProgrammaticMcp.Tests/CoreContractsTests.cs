@@ -144,6 +144,40 @@ public sealed class CoreContractsTests
     }
 
     [Fact]
+    public void SchemaGenerationSupportsNullableReferenceTypesAndConditionalJsonIgnoreProperties()
+    {
+        var generator = new BuiltInSchemaGenerator();
+
+        var nullableSchema = generator.Generate(typeof(NullableReferenceFixture));
+        var nullableProperties = nullableSchema["properties"]!.AsObject();
+        var nullableRequired = nullableSchema["required"]?.AsArray().Select(static item => item!.GetValue<string>()) ?? Array.Empty<string>();
+
+        Assert.Contains("anyOf", nullableProperties["note"]!.ToJsonString(), StringComparison.Ordinal);
+        Assert.Contains("anyOf", nullableProperties["values"]!.ToJsonString(), StringComparison.Ordinal);
+        Assert.Contains("anyOf", nullableProperties["names"]!.ToJsonString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("note", nullableRequired);
+        Assert.DoesNotContain("values", nullableRequired);
+        Assert.DoesNotContain("names", nullableRequired);
+
+        JsonSchemaValidator.Validate(
+            JsonNode.Parse("""{"note":null,"values":null,"names":["alpha",null]}"""),
+            nullableSchema);
+        JsonSchemaValidator.Validate(JsonNode.Parse("{}"), nullableSchema);
+
+        var ignoreSchema = generator.Generate(typeof(JsonIgnoreFixture));
+        var ignoreProperties = ignoreSchema["properties"]!.AsObject();
+        var ignoreRequired = ignoreSchema["required"]?.AsArray().Select(static item => item!.GetValue<string>()) ?? Array.Empty<string>();
+
+        Assert.True(ignoreProperties.ContainsKey("visible"));
+        Assert.True(ignoreProperties.ContainsKey("writeOnly"));
+        Assert.False(ignoreProperties.ContainsKey("hidden"));
+        Assert.Contains("writeOnly", ignoreRequired);
+        JsonSchemaValidator.Validate(
+            JsonNode.Parse("""{"visible":"hello","writeOnly":"value"}"""),
+            ignoreSchema);
+    }
+
+    [Fact]
     public void SchemaGenerationTreatsDictionaryStringValuesAsObjectMaps()
     {
         var generator = new BuiltInSchemaGenerator();
@@ -154,20 +188,6 @@ public sealed class CoreContractsTests
         Assert.Equal("object", valuesSchema["type"]!.GetValue<string>());
         Assert.False(valuesSchema.ContainsKey("items"));
         Assert.Equal("integer", valuesSchema["additionalProperties"]!["type"]!.GetValue<string>());
-    }
-
-    [Fact]
-    public void SchemaGenerationOmitsJsonIgnoredProperties()
-    {
-        var generator = new BuiltInSchemaGenerator();
-
-        var schema = generator.Generate(typeof(JsonIgnoreFixture));
-        var properties = schema["properties"]!.AsObject();
-
-        Assert.True(properties.ContainsKey("visible"));
-        Assert.False(properties.ContainsKey("hidden"));
-        Assert.DoesNotContain("hidden", schema["required"]!.AsArray().Select(static item => item!.GetValue<string>()));
-        Assert.DoesNotContain("hidden", schema.ToJsonString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -275,6 +295,48 @@ public sealed class CoreContractsTests
         Assert.Contains("function bar(input: FooBarInput2): Promise<FooBarResult2>;", catalog.GeneratedTypeScript, StringComparison.Ordinal);
         Assert.Equal("foo.bar(input: FooBarInput2) -> Promise<FooBarResult2>", catalog.Capabilities[0].Signature);
         Assert.Equal("fooBar(input: FooBarInput) -> Promise<FooBarResult>", catalog.Capabilities[1].Signature);
+    }
+
+    [Fact]
+    public void GeneratedTypeScriptParenthesizesNullableArrayItems()
+    {
+        var catalog = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddCapability<ArrayFixture, ArrayFixture>(
+                "values.echo",
+                capability => capability
+                    .WithDescription("Echoes nullable array values.")
+                    .UseWhen("You need nullable values back.")
+                    .DoNotUseWhen("You need anything else.")
+                    .WithHandler((input, _) => ValueTask.FromResult(input)))
+            .BuildCatalog();
+
+        Assert.Contains("(number | null)[]", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FullDetailSearchResultsAreDetachedFromCatalogState()
+    {
+        var catalog = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddCapability<SearchExampleInput, SearchExampleResult>(
+                "items.get",
+                capability => capability
+                    .WithDescription("Gets an item.")
+                    .UseWhen("You need one item.")
+                    .DoNotUseWhen("You need a list.")
+                    .AddExample("Example item", new SearchExampleInput("a"), new SearchExampleResult("b"))
+                    .WithHandler((input, _) => ValueTask.FromResult(new SearchExampleResult(input.Id))))
+            .BuildCatalog();
+
+        var first = catalog.Search(new CapabilitySearchRequest(DetailLevel: CapabilityDetailLevel.Full, Limit: 1));
+        first.Items[0].Examples[0].Input!["id"] = "mutated";
+        ((string[])first.Items[0].Guidance!.UseWhen)[0] = "mutated";
+
+        var second = catalog.Search(new CapabilitySearchRequest(DetailLevel: CapabilityDetailLevel.Full, Limit: 1));
+
+        Assert.Equal("a", second.Items[0].Examples[0].Input!["id"]!.GetValue<string>());
+        Assert.Equal("You need one item.", second.Items[0].Guidance!.UseWhen[0]);
     }
 
     [Fact]
@@ -646,6 +708,11 @@ public sealed class CoreContractsTests
         IReadOnlyDictionary<string, string> Metadata,
         string? OptionalNote);
 
+    public sealed record NullableReferenceFixture(
+        string? Note,
+        IReadOnlyList<int>? Values,
+        IReadOnlyList<string?>? Names);
+
     public sealed record NestedFixture(string Name);
 
     public sealed record RepeatedContainer(RepeatedNode Primary, RepeatedNode Secondary);
@@ -660,7 +727,16 @@ public sealed class CoreContractsTests
 
     public sealed record AliasedPropertyResult([property: JsonPropertyName("status-code")] string StatusCode);
 
-    public sealed record JsonIgnoreFixture(string Visible, [property: JsonIgnore] string Hidden);
+    public sealed record JsonIgnoreFixture(
+        string Visible,
+        [property: JsonIgnore] string Hidden,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string WriteOnly);
+
+    public sealed record ArrayFixture(int?[] Values);
+
+    public sealed record SearchExampleInput(string Id);
+
+    public sealed record SearchExampleResult(string Id);
 
     public sealed record CollidingDefinitionContainer(
         OuterAlpha.Node Left1,

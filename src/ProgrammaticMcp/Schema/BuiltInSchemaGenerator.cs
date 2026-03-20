@@ -25,7 +25,8 @@ public sealed class BuiltInSchemaGenerator
             objectCounts,
             new Dictionary<Type, string>(),
             new Dictionary<string, Type>(StringComparer.Ordinal),
-            new SortedDictionary<string, JsonNode>(StringComparer.Ordinal));
+            new SortedDictionary<string, JsonNode>(StringComparer.Ordinal),
+            null);
         generated["$schema"] = ProgrammaticContractConstants.JsonSchemaDialect;
         return generated;
     }
@@ -82,9 +83,10 @@ public sealed class BuiltInSchemaGenerator
         IReadOnlyDictionary<Type, int> objectCounts,
         Dictionary<Type, string> assignedDefinitionNames,
         Dictionary<string, Type> assignedDefinitionTypes,
-        SortedDictionary<string, JsonNode> definitions)
+        SortedDictionary<string, JsonNode> definitions,
+        NullabilityInfo? nullabilityInfo)
     {
-        var node = GenerateSchema(type, isRoot, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions);
+        var node = GenerateSchema(type, isRoot, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions, nullabilityInfo);
         if (isRoot && definitions.Count > 0)
         {
             var definitionsObject = new JsonObject();
@@ -105,50 +107,71 @@ public sealed class BuiltInSchemaGenerator
         IReadOnlyDictionary<Type, int> objectCounts,
         Dictionary<Type, string> assignedDefinitionNames,
         Dictionary<string, Type> assignedDefinitionTypes,
-        SortedDictionary<string, JsonNode> definitions)
+        SortedDictionary<string, JsonNode> definitions,
+        NullabilityInfo? nullabilityInfo)
     {
         var effectiveType = UnwrapNullable(type);
         if (TryGeneratePrimitiveSchema(type, out var primitive))
         {
-            return primitive;
+            return ApplyNullableSchema(type, nullabilityInfo, primitive);
         }
 
+        JsonObject schema;
         if (TryGetDictionaryValueType(effectiveType, out var valueType))
         {
-            return new JsonObject
+            schema = new JsonObject
             {
                 ["type"] = "object",
-                ["additionalProperties"] = GenerateSchema(valueType!, false, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions)
+                ["additionalProperties"] = GenerateSchema(
+                    valueType!,
+                    false,
+                    objectCounts,
+                    assignedDefinitionNames,
+                    assignedDefinitionTypes,
+                    definitions,
+                    GetDictionaryValueNullability(nullabilityInfo))
             };
         }
-
-        if (TryGetCollectionElementType(effectiveType, out var elementType))
+        else if (TryGetCollectionElementType(effectiveType, out var elementType))
         {
-            return new JsonObject
+            schema = new JsonObject
             {
                 ["type"] = "array",
-                ["items"] = GenerateSchema(elementType!, false, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions)
+                ["items"] = GenerateSchema(
+                    elementType!,
+                    false,
+                    objectCounts,
+                    assignedDefinitionNames,
+                    assignedDefinitionTypes,
+                    definitions,
+                    GetCollectionElementNullability(nullabilityInfo))
             };
         }
-
-        if (!IsObjectShape(effectiveType))
+        else
         {
-            throw new UnsupportedSchemaTypeException(effectiveType, "explicit schema override is required");
-        }
-
-        if (!isRoot && objectCounts.TryGetValue(effectiveType, out var count) && count > 1)
-        {
-            if (!assignedDefinitionNames.TryGetValue(effectiveType, out var definitionName))
+            if (!IsObjectShape(effectiveType))
             {
-                definitionName = SchemaNaming.ResolveDefinitionName(effectiveType, assignedDefinitionTypes);
-                assignedDefinitionNames[effectiveType] = definitionName;
-                definitions[definitionName] = GenerateObjectSchema(effectiveType, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions);
+                throw new UnsupportedSchemaTypeException(effectiveType, "explicit schema override is required");
             }
 
-            return new JsonObject { ["$ref"] = $"#/$defs/{definitionName}" };
+            if (!isRoot && objectCounts.TryGetValue(effectiveType, out var count) && count > 1)
+            {
+                if (!assignedDefinitionNames.TryGetValue(effectiveType, out var definitionName))
+                {
+                    definitionName = SchemaNaming.ResolveDefinitionName(effectiveType, assignedDefinitionTypes);
+                    assignedDefinitionNames[effectiveType] = definitionName;
+                    definitions[definitionName] = GenerateObjectSchema(effectiveType, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions);
+                }
+
+                schema = new JsonObject { ["$ref"] = $"#/$defs/{definitionName}" };
+            }
+            else
+            {
+                schema = GenerateObjectSchema(effectiveType, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions);
+            }
         }
 
-        return GenerateObjectSchema(effectiveType, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions);
+        return ApplyNullableSchema(type, nullabilityInfo, schema);
     }
 
     private JsonObject GenerateObjectSchema(
@@ -163,7 +186,14 @@ public sealed class BuiltInSchemaGenerator
 
         foreach (var property in GetSerializableProperties(type))
         {
-            var propertySchema = GenerateSchema(property.PropertyType, false, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions);
+            var propertySchema = GenerateSchema(
+                property.PropertyType,
+                false,
+                objectCounts,
+                assignedDefinitionNames,
+                assignedDefinitionTypes,
+                definitions,
+                property.NullabilityInfo);
             properties[property.Name] = propertySchema;
 
             if (property.Required)
@@ -274,7 +304,7 @@ public sealed class BuiltInSchemaGenerator
             }
 
             var ignore = property.GetCustomAttribute<JsonIgnoreAttribute>();
-            if (ignore is not null && ignore.Condition != JsonIgnoreCondition.Never)
+            if (ignore is not null && ignore.Condition == JsonIgnoreCondition.Always)
             {
                 continue;
             }
@@ -282,11 +312,11 @@ public sealed class BuiltInSchemaGenerator
             var jsonName = property.GetCustomAttribute<JsonPropertyNameAttribute>()?.Name
                 ?? JsonNamingPolicy.CamelCase.ConvertName(property.Name);
             var nullability = _nullabilityInfoContext.Create(property);
-            var isNullableReference = property.PropertyType.IsClass && nullability.ReadState != NullabilityState.NotNull;
+            var isNullableReference = nullability.ReadState == NullabilityState.Nullable;
             var required = property.GetCustomAttribute<System.ComponentModel.DataAnnotations.RequiredAttribute>() is not null
                 || (!isNullableReference && !IsNullable(property.PropertyType));
 
-            yield return new GeneratedProperty(jsonName, property.PropertyType, required);
+            yield return new GeneratedProperty(jsonName, property.PropertyType, nullability, required);
         }
     }
 
@@ -345,6 +375,37 @@ public sealed class BuiltInSchemaGenerator
 
     private static Type UnwrapNullable(Type type) => Nullable.GetUnderlyingType(type) ?? type;
 
+    private static JsonObject ApplyNullableSchema(Type type, NullabilityInfo? nullabilityInfo, JsonObject schema)
+    {
+        if (type.IsValueType && IsNullable(type))
+        {
+            return schema;
+        }
+
+        if (nullabilityInfo is null || nullabilityInfo.ReadState != NullabilityState.Nullable)
+        {
+            return schema;
+        }
+
+        return new JsonObject
+        {
+            ["anyOf"] = new JsonArray(
+                schema.DeepClone(),
+                new JsonObject { ["type"] = "null" })
+        };
+    }
+
+    private static NullabilityInfo? GetCollectionElementNullability(NullabilityInfo? nullabilityInfo)
+    {
+        return nullabilityInfo?.ElementType
+            ?? (nullabilityInfo?.GenericTypeArguments.Length > 0 ? nullabilityInfo.GenericTypeArguments[0] : null);
+    }
+
+    private static NullabilityInfo? GetDictionaryValueNullability(NullabilityInfo? nullabilityInfo)
+    {
+        return nullabilityInfo?.GenericTypeArguments.Length > 1 ? nullabilityInfo.GenericTypeArguments[1] : null;
+    }
+
     private static bool IsInteger(Type type)
     {
         type = UnwrapNullable(type);
@@ -364,7 +425,7 @@ public sealed class BuiltInSchemaGenerator
         return type == typeof(float) || type == typeof(double) || type == typeof(decimal);
     }
 
-    private readonly record struct GeneratedProperty(string Name, Type PropertyType, bool Required);
+    private readonly record struct GeneratedProperty(string Name, Type PropertyType, NullabilityInfo NullabilityInfo, bool Required);
 }
 
 internal static class SchemaNaming

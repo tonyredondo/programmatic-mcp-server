@@ -130,6 +130,28 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     }
 
     [Fact]
+    public async Task RouteGroupPrefixIsAdvertisedAndUsedForCallerBindingCookies()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            mcpPath: "/secured/mcp",
+            configureApp: (app, _) =>
+            {
+                var group = app.MapGroup("/secured");
+                group.MapProgrammaticMcpServer("/mcp");
+            });
+
+        await using var sessionClient = await host.CreateSessionClientAsync();
+        Assert.Contains("Types: GET /secured/mcp/types", sessionClient.ServerInstructions, StringComparison.Ordinal);
+
+        await using var rawClient = host.CreateRawClient();
+        var initialize = await rawClient.InitializeAsync();
+        Assert.True(initialize.HttpResponse.Headers.TryGetValues("Set-Cookie", out var setCookieValues));
+        Assert.Contains(
+            setCookieValues!,
+            static value => value.Contains("Path=/secured/mcp", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task TypesEndpointHandlesEmptyCatalogAndGenerationFailures()
     {
         await using var emptyHost = await ProgrammaticMcpTestHost.StartAsync(includeDefaultCatalog: false);

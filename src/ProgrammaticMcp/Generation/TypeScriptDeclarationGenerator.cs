@@ -111,6 +111,13 @@ public static class TypeScriptDeclarationGenerator
     private static string RenderTypeScript(JsonNode schema, IReadOnlyDictionary<string, string> definitionAliases)
     {
         var schemaObject = schema.AsObject();
+        if (schemaObject["anyOf"] is JsonArray anyOfArray)
+        {
+            return string.Join(
+                " | ",
+                anyOfArray.Select(item => RenderTypeScript(item!, definitionAliases)));
+        }
+
         if (schemaObject.TryGetPropertyValue("$ref", out var reference) && reference is JsonValue referenceValue)
         {
             var definitionName = referenceValue.GetValue<string>().Split('/').Last();
@@ -140,7 +147,7 @@ public static class TypeScriptDeclarationGenerator
         return type switch
         {
             "object" => RenderObject(schema, definitionAliases),
-            "array" => $"{RenderTypeScript(schema["items"]!, definitionAliases)}[]",
+            "array" => RenderArrayType(schema["items"]!, definitionAliases),
             "string" => "string",
             "integer" => "number",
             "number" => "number",
@@ -148,6 +155,12 @@ public static class TypeScriptDeclarationGenerator
             "null" => "null",
             _ => "unknown"
         };
+    }
+
+    private static string RenderArrayType(JsonNode itemsSchema, IReadOnlyDictionary<string, string> definitionAliases)
+    {
+        var itemType = RenderTypeScript(itemsSchema, definitionAliases);
+        return itemType.Contains('|', StringComparison.Ordinal) ? $"({itemType})[]" : $"{itemType}[]";
     }
 
     private static string RenderObject(JsonObject schema, IReadOnlyDictionary<string, string> definitionAliases)

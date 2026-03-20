@@ -52,7 +52,7 @@ public static class SampleServerHosting
 
         app.MapGet(
             "/",
-            () => Results.Ok(
+            (SampleWorkspace workspace) => Results.Ok(
                 new
                 {
                     project = "ProgrammaticMcp.SampleServer",
@@ -66,7 +66,7 @@ public static class SampleServerHosting
                     },
                     sampleIds = new
                     {
-                        openTask = "task-1",
+                        openTask = workspace.GetCurrentOpenTaskId(),
                         completedTask = "task-3",
                         projects = new[] { "project-alpha", "project-beta" }
                     }

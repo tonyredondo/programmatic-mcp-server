@@ -33,6 +33,23 @@ public static class JsonSchemaValidator
     {
         var schemaObject = schema.AsObject();
 
+        if (schemaObject["anyOf"] is JsonArray anyOfArray)
+        {
+            foreach (var candidate in anyOfArray)
+            {
+                try
+                {
+                    ValidateNode(value, candidate!, rootSchema, path);
+                    return;
+                }
+                catch (JsonSchemaValidationException)
+                {
+                }
+            }
+
+            throw new JsonSchemaValidationException($"Value at {path} does not match any allowed schema.");
+        }
+
         if (schemaObject.TryGetPropertyValue("$ref", out var referenceNode) && referenceNode is JsonValue referenceValue)
         {
             ValidateNode(value, ResolveReference(referenceValue.GetValue<string>(), rootSchema), rootSchema, path);

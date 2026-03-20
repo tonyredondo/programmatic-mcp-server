@@ -24,6 +24,7 @@ public sealed class ProgrammaticMcpSampleServerTests
         Assert.Equal("/mcp", root["endpoints"]!["mcp"]!.GetValue<string>());
         Assert.Equal("/mcp/types", root["endpoints"]!["types"]!.GetValue<string>());
         Assert.Equal("/mcp/health", root["endpoints"]!["health"]!.GetValue<string>());
+        Assert.Equal("task-1", root["sampleIds"]!["openTask"]!.GetValue<string>());
         Assert.Equal(System.Net.HttpStatusCode.OK, health.StatusCode);
     }
 
@@ -146,6 +147,10 @@ public sealed class ProgrammaticMcpSampleServerTests
 
         Assert.Equal("completed", apply["status"]!.GetValue<string>());
         Assert.Equal("completed", apply["result"]!["newStatus"]!.GetValue<string>());
+
+        var updatedRoot = await client.GetFromJsonAsync<JsonObject>("/");
+        Assert.NotNull(updatedRoot);
+        Assert.NotEqual("task-1", updatedRoot!["sampleIds"]!["openTask"]!.GetValue<string>());
     }
 
     [Fact]

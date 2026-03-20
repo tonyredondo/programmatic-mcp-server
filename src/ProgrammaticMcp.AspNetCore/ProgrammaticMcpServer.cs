@@ -242,11 +242,16 @@ public static class ProgrammaticMcpServiceCollectionExtensions
                         var routeState = httpContext.RequestServices.GetRequiredService<ProgrammaticMcpRouteState>();
                         var runtimeOptions = httpContext.RequestServices.GetRequiredService<ProgrammaticMcpServerOptions>();
                         var callerBindingResolver = httpContext.RequestServices.GetRequiredService<ProgrammaticCallerBindingResolver>();
+                        var resolvedRoutePrefix = callerBindingResolver.ResolveRoutePrefix(httpContext);
                         serverOptions.ServerInfo = new Implementation
                         {
                             Name = runtimeOptions.ServerName,
                             Version = runtimeOptions.ServerVersion
                         };
+                        routeState.RoutePrefix = resolvedRoutePrefix;
+                        routeState.TypeEndpointPath = resolvedRoutePrefix == "/"
+                            ? "/" + runtimeOptions.TypeEndpointSegment
+                            : resolvedRoutePrefix + "/" + runtimeOptions.TypeEndpointSegment;
                         serverOptions.ServerInstructions = ProgrammaticInstructionsBuilder.Build(runtimeOptions, routeState);
                         await callerBindingResolver.IssueInitialCookieAsync(httpContext, cancellationToken);
                         await Task.CompletedTask;
@@ -563,6 +568,11 @@ internal sealed class ProgrammaticCallerBindingResolver(
     public async ValueTask<CallerBindingResolution> ResolveAsync(MessageContext context, CancellationToken cancellationToken)
     {
         var httpContext = httpContextAccessor.HttpContext ?? context.Services?.GetService<IHttpContextAccessor>()?.HttpContext;
+        if (httpContext is not null)
+        {
+            ResolveRoutePrefix(httpContext);
+        }
+
         var principal = context.User;
         var principalIdentity = principal?.Identity?.IsAuthenticated == true
             ? principal.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? principal.Identity?.Name
@@ -632,6 +642,7 @@ internal sealed class ProgrammaticCallerBindingResolver(
     {
         ArgumentNullException.ThrowIfNull(httpContext);
         cancellationToken.ThrowIfCancellationRequested();
+        ResolveRoutePrefix(httpContext);
 
         if (!options.EnableCookieCallerBinding)
         {
@@ -715,6 +726,28 @@ internal sealed class ProgrammaticCallerBindingResolver(
         }
 
         throw new InvalidOperationException("Same-origin validation failed for cookie-bound caller binding.");
+    }
+
+    internal string ResolveRoutePrefix(HttpContext httpContext)
+    {
+        var resolved = httpContext.Request.PathBase.Add(httpContext.Request.Path).ToString();
+        if (string.IsNullOrWhiteSpace(resolved))
+        {
+            return options.RoutePrefix;
+        }
+
+        if (!resolved.StartsWith("/", StringComparison.Ordinal))
+        {
+            resolved = "/" + resolved;
+        }
+
+        if (resolved.Length > 1 && resolved.EndsWith("/", StringComparison.Ordinal))
+        {
+            resolved = resolved.TrimEnd('/');
+        }
+
+        options.RoutePrefix = resolved;
+        return resolved;
     }
 
     private static bool IsSameOrigin(HttpContext httpContext, string candidate)

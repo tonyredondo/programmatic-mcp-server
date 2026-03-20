@@ -82,15 +82,6 @@ public sealed class JintCodeExecutor : ICodeExecutor
         var diagnostics = new List<ExecutionDiagnostic>();
         var services = request.Services ?? EmptyServiceProvider.Instance;
 
-        if (callerBindingId is null && visibleCapabilities.Any(static capability => capability.IsMutation))
-        {
-            diagnostics.Add(
-                new ExecutionDiagnostic(
-                    "mutation_preview_unavailable",
-                    "Mutation previews require a caller binding.",
-                    new JsonObject { ["reason"] = "missing_caller_binding" }));
-        }
-
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(limits.TimeoutMs);
         using var bridge = new CatalogBridge(
@@ -102,7 +93,8 @@ public sealed class JintCodeExecutor : ICodeExecutor
             callerBindingId,
             _artifactStore,
             _approvalStore,
-            diagnostics);
+            diagnostics,
+            cancellationToken);
         bridge.ExecutionCancellationToken = timeoutCts.Token;
         using var engine = CreateEngine(bridge, limits, timeoutCts.Token);
         var metricsCollector = RuntimeMetricsCollector.Create(engine);
@@ -167,7 +159,10 @@ public sealed class JintCodeExecutor : ICodeExecutor
                     diagnostics.Add(new ExecutionDiagnostic(code, message, data?.DeepClone().AsObject()));
                 }
 
-                if (code is not "entrypoint_not_found" and not "invalid_entrypoint")
+                if (code is not "entrypoint_not_found"
+                    and not "invalid_entrypoint"
+                    and not "timeout"
+                    and not "execution_cancelled")
                 {
                     diagnostics.Add(
                         new ExecutionDiagnostic(
@@ -586,7 +581,7 @@ public sealed class JintCodeExecutor : ICodeExecutor
             {
                 diagnostics.Add(
                     new ExecutionDiagnostic(
-                        "execution_failed",
+                        "execution_cancelled",
                         "Execution was cancelled.",
                         new JsonObject { ["reason"] = "cancelled" }));
             }
@@ -668,6 +663,7 @@ public sealed class JintCodeExecutor : ICodeExecutor
         private readonly ICapabilityCatalog _catalog;
         private readonly CodeExecutionRequest _request;
         private readonly IServiceProvider _services;
+        private readonly CancellationToken _requestCancellationToken;
         private int _apiCallCount;
         private int _consoleBytesEmitted;
         private bool _consoleTruncated;
@@ -681,11 +677,13 @@ public sealed class JintCodeExecutor : ICodeExecutor
             string? callerBindingId,
             IArtifactStore artifactStore,
             IApprovalStore approvalStore,
-            List<ExecutionDiagnostic> diagnostics)
+            List<ExecutionDiagnostic> diagnostics,
+            CancellationToken requestCancellationToken)
         {
             _catalog = catalog;
             _request = request;
             _services = services;
+            _requestCancellationToken = requestCancellationToken;
             Limits = limits;
             CallerBindingId = callerBindingId;
             ApprovalStore = approvalStore;
@@ -827,11 +825,16 @@ public sealed class JintCodeExecutor : ICodeExecutor
             }
             catch (OperationCanceledException)
             {
+                var cancelledByCaller = _requestCancellationToken.IsCancellationRequested;
                 return Fail(
                     new StructuredBridgeException(
-                        "timeout",
-                        "Execution exceeded the configured timeout.",
-                        new JsonObject { ["capabilityPath"] = capability.ApiPath },
+                        cancelledByCaller ? "execution_cancelled" : "timeout",
+                        cancelledByCaller ? "Execution was cancelled." : "Execution exceeded the configured timeout.",
+                        new JsonObject
+                        {
+                            ["capabilityPath"] = capability.ApiPath,
+                            ["reason"] = cancelledByCaller ? "cancelled" : "timeout"
+                        },
                         capability.ApiPath));
             }
             catch (ArtifactContinuityUnavailableException exception)
@@ -980,11 +983,16 @@ public sealed class JintCodeExecutor : ICodeExecutor
             }
             catch (OperationCanceledException)
             {
+                var cancelledByCaller = _requestCancellationToken.IsCancellationRequested;
                 return Fail(
                     new StructuredBridgeException(
-                        "timeout",
-                        "Execution exceeded the configured timeout.",
-                        new JsonObject { ["capabilityPath"] = capability.ApiPath },
+                        cancelledByCaller ? "execution_cancelled" : "timeout",
+                        cancelledByCaller ? "Execution was cancelled." : "Execution exceeded the configured timeout.",
+                        new JsonObject
+                        {
+                            ["capabilityPath"] = capability.ApiPath,
+                            ["reason"] = cancelledByCaller ? "cancelled" : "timeout"
+                        },
                         capability.ApiPath));
             }
             catch (ArtifactContinuityUnavailableException exception)
