@@ -24,6 +24,13 @@ public sealed class ProgrammaticMcpSampleServerTests
         Assert.Equal("/mcp", root["endpoints"]!["mcp"]!.GetValue<string>());
         Assert.Equal("/mcp/types", root["endpoints"]!["types"]!.GetValue<string>());
         Assert.Equal("/mcp/health", root["endpoints"]!["health"]!.GetValue<string>());
+        Assert.Equal(
+            new[]
+            {
+                "sample://workspace/guide",
+                "sample://workspace/projects"
+            },
+            root["resourceUris"]!.AsArray().Select(static item => item!.GetValue<string>()).ToArray());
         Assert.Equal("task-1", root["sampleIds"]!["openTask"]!.GetValue<string>());
         Assert.Equal(System.Net.HttpStatusCode.OK, health.StatusCode);
     }
@@ -234,6 +241,41 @@ public sealed class ProgrammaticMcpSampleServerTests
         Assert.Empty(list["items"]!.AsArray());
     }
 
+    [Fact]
+    public async Task SampleServerAdvertisesAndReadsResources()
+    {
+        await using var factory = CreateFactory();
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+        var rawClient = new SampleRawMcpClient(client);
+
+        await rawClient.InitializeAsync();
+
+        var list = await rawClient.ListResourcesAsync();
+        var resources = list["resources"]!.AsArray()
+            .Select(item => item!.AsObject())
+            .OrderBy(static item => item["uri"]!.GetValue<string>(), StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(
+            new[]
+            {
+                "sample://workspace/guide",
+                "sample://workspace/projects"
+            },
+            resources.Select(static item => item["uri"]!.GetValue<string>()).ToArray());
+
+        var guide = await rawClient.ReadResourceAsync("sample://workspace/guide");
+        var guideContents = Assert.IsType<JsonObject>(Assert.Single(guide["contents"]!.AsArray()));
+        Assert.Equal("sample://workspace/guide", guideContents["uri"]!.GetValue<string>());
+        Assert.Equal("text/markdown", guideContents["mimeType"]!.GetValue<string>());
+        Assert.Contains("Sample Workspace Guide", guideContents["text"]!.GetValue<string>(), StringComparison.Ordinal);
+
+        var projects = await rawClient.ReadResourceAsync("sample://workspace/projects");
+        var projectContents = Assert.IsType<JsonObject>(Assert.Single(projects["contents"]!.AsArray()));
+        Assert.Equal("application/json", projectContents["mimeType"]!.GetValue<string>());
+        Assert.Contains("project-alpha", projectContents["text"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
     private static WebApplicationFactory<Program> CreateFactory()
     {
         return new WebApplicationFactory<Program>()
@@ -280,6 +322,27 @@ public sealed class ProgrammaticMcpSampleServerTests
 
             Assert.Null(response["error"]);
             return ParseStructuredContent(response["result"]!.AsObject());
+        }
+
+        public async Task<JsonObject> ListResourcesAsync(CancellationToken cancellationToken = default)
+        {
+            var response = await SendAsync("resources/list", new JsonObject(), cancellationToken);
+            Assert.Null(response["error"]);
+            return response["result"]!.AsObject();
+        }
+
+        public async Task<JsonObject> ReadResourceAsync(string uri, CancellationToken cancellationToken = default)
+        {
+            var response = await SendAsync(
+                "resources/read",
+                new JsonObject
+                {
+                    ["uri"] = uri
+                },
+                cancellationToken);
+
+            Assert.Null(response["error"]);
+            return response["result"]!.AsObject();
         }
 
         private async Task<JsonObject> SendAsync(string method, JsonObject parameters, CancellationToken cancellationToken)

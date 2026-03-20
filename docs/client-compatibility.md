@@ -20,8 +20,11 @@ Validation coverage for the repository harness includes:
 
 - `initialize`
 - `tools/list`
+- `resources/list`
+- `resources/read`
 - `capabilities.search`
 - `code.execute`
+- stateful live sampling through `programmatic.client.sample(...)`
 - `artifact.read`
 - `mutation.list`
 - `mutation.apply`
@@ -36,13 +39,17 @@ Validation coverage for the repository harness includes:
 
 ## Current Compatibility Notes
 
+- `client` is now a reserved top-level programmatic namespace segment. Hosts should not register capabilities or mutations under `client.*`.
 - The built-in cookie fallback is intended for HTTP MCP clients that preserve cookies across reconnects.
 - The built-in signed-header fallback is intended for non-cookie HTTP clients that can be provisioned with a stable `X-Programmatic-Mcp-Caller-Binding` token out of band.
 - The repository test harness validates the normal sessioned C# MCP SDK client path and also validates cookie and signed-header reconnect flows through both the SDK harness and the stateless raw HTTP harness.
+- Resource support is validated on the repository-owned SDK session path and on the raw stateless HTTP harness. Resources are separate from the six-tool programmatic surface.
+- Live sampling is validated on the repository-owned stateful SDK path with a real session-backed sampling handler. Stateless HTTP remains validated as a non-sampling path.
 - The repository-owned SDK cookie-fallback coverage reconnects with the preserved caller-binding cookie and a same-origin `Origin` header, because cookie-derived caller binding requires same-origin validation.
 - The signed-header bootstrap path is host-owned: the host generates a stable token through `IProgrammaticCallerBindingTokenService.CreateSignedHeaderToken(...)` and provisions it to the client out of band before the client reconnects with `X-Programmatic-Mcp-Caller-Binding`.
 - The built-in cookie fallback issues a route-scoped, `HttpOnly`, `SameSite=Lax`, `Secure` cookie by default and enforces same-origin checks on any MCP request that resolves caller binding from that cookie.
 - The sample server relaxes the cookie `Secure` flag only for localhost-style development requests.
+- `programmatic.client.sample(...)` is part of the shared generated runtime contract, but it is only usable on the stateful ASP.NET transport when the connected client advertises MCP sampling and the execution uses an explicit read-only `VisibleApiPaths` scope.
 - Browser-style CORS configuration remains host-owned. The library does not enable CORS automatically.
 - Health endpoints also remain host-owned. The library does not map them automatically.
 

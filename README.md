@@ -9,6 +9,8 @@ The library is built around one idea: an agent should be able to discover a focu
 The current implementation provides:
 
 - capability registration and progressive discovery
+- read-only MCP resource registration through `resources/list` and `resources/read`
+- dedicated sampling-tool registration for live MCP sampling loops
 - generated JavaScript and TypeScript-facing API surface
 - constrained JavaScript execution through `Jint`
 - artifact storage and paged artifact reads
@@ -35,12 +37,14 @@ At a high level, the implemented flow is:
 
 1. call `initialize`
 2. call `tools/list`
-3. use `capabilities.search` to discover relevant capabilities
-4. fetch the generated declarations from `/types` when the client wants stronger code generation support
-5. generate JavaScript against `globalThis.programmatic`
-6. execute that JavaScript through `code.execute`
-7. read large results through `artifact.read`
-8. preview and apply writes through `mutation.list`, `mutation.apply`, and `mutation.cancel`
+3. optionally call `resources/list` and `resources/read` for read-only supplemental context
+4. use `capabilities.search` to discover relevant capabilities
+5. fetch the generated declarations from `/types` when the client wants stronger code generation support
+6. generate JavaScript against `globalThis.programmatic`
+7. execute that JavaScript through `code.execute`
+8. when the server is stateful and the connected client advertises MCP sampling, use `programmatic.client.sample(...)` inside explicitly scoped read-only executions
+8. read large results through `artifact.read`
+9. preview and apply writes through `mutation.list`, `mutation.apply`, and `mutation.cancel`
 
 For a fuller explanation of the execution model, artifact flow, approval flow, transport model, and supported scope, see [docs/overview.md](docs/overview.md).
 
@@ -49,11 +53,11 @@ For a fuller explanation of the execution model, artifact flow, approval flow, t
 The repository currently ships three library packages and one sample server:
 
 - `ProgrammaticMcp`
-  Core abstractions, capability metadata, schema generation, hashing, approvals, artifacts, and shared contracts.
+  Core abstractions, capability metadata, resource and sampling-tool registration, schema generation, hashing, approvals, artifacts, and shared contracts.
 - `ProgrammaticMcp.Jint`
-  The Jint-backed execution runtime, generated namespace bootstrap, bridge logic, and runtime diagnostics.
+  The Jint-backed execution runtime, generated namespace bootstrap including `programmatic.client.sample(...)`, bridge logic, and runtime diagnostics.
 - `ProgrammaticMcp.AspNetCore`
-  ASP.NET Core and C# MCP SDK integration, tool exposure, caller binding, HTTP-specific behavior, and `/types`.
+  ASP.NET Core and C# MCP SDK integration, MCP tool and resource exposure, live sampling integration, caller binding, HTTP-specific behavior, and `/types`.
 - `samples/ProgrammaticMcp.SampleServer`
   A reference host used to prove the full loop end to end.
 
@@ -123,16 +127,22 @@ The sample domain is intentionally small and in-memory. It exposes these exact c
 - `tasks.exportReport`
 - `tasks.complete`
 
+The sample also exposes these exact MCP resources:
+
+- `sample://workspace/guide`
+- `sample://workspace/projects`
+
 The sample runs MCP over stateless HTTP, enables signed-header caller binding, and also issues the built-in caller-binding cookie for localhost-style cookie-capable clients.
 
 ## Sample Flow
 
 The short version of the sample flow is:
 
-1. discover capabilities with `capabilities.search`
-2. execute generated code with `code.execute`
-3. read spilled report output with `artifact.read`
-4. preview, list, and apply a mutation with `code.execute`, `mutation.list`, and `mutation.apply`
+1. optionally inspect sample resources with `resources/list` and `resources/read`
+2. discover capabilities with `capabilities.search`
+3. execute generated code with `code.execute`
+4. read spilled report output with `artifact.read`
+5. preview, list, and apply a mutation with `code.execute`, `mutation.list`, and `mutation.apply`
 
 Clients must provide a `conversationId` that matches `^[A-Za-z0-9._:-]{1,128}$`.
 
@@ -144,6 +154,8 @@ Example `code.execute` body:
   "code": "async function main() { return await programmatic.tasks.getById({ taskId: 'task-1' }); }"
 }
 ```
+
+The sample does not demonstrate live sampling. It runs over stateless HTTP, so `programmatic.client.sample(...)` remains unavailable there even though the shared generated runtime includes that helper for stateful ASP.NET hosts.
 
 Example report-spill execution:
 
@@ -174,6 +186,8 @@ The current implementation supports:
 - .NET 8 and .NET 10 target frameworks for the library packages
 - `Jint` as the built-in JavaScript runtime
 - ASP.NET Core as the current supported transport adapter
+- MCP read-only resources as a separate capability from the six-tool programmatic surface
+- live MCP sampling through `programmatic.client.sample(...)` and `GetSamplingClient(...)` during explicitly scoped read-only executions on the stateful ASP.NET transport
 - in-memory built-in approval and artifact stores
 - HTTP caller binding through authenticated principal, MCP session identity, signed cookie fallback, or signed-header fallback
 
@@ -189,6 +203,7 @@ The repository does not currently provide:
 - product-specific business logic
 - automatic CORS policy configuration
 - a shared built-in approval or artifact store for multi-process deployments
+- the `programmatic.client.*` runtime namespace for user-defined capabilities or mutations; `client` is now reserved for forward compatibility
 
 ## Documentation Map
 

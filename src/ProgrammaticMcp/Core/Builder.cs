@@ -8,7 +8,9 @@ namespace ProgrammaticMcp;
 /// </summary>
 public sealed class ProgrammaticMcpBuilder
 {
-    private readonly List<ICapabilityRegistration> _registrations = new();
+    private readonly List<ICapabilityRegistration> _capabilityRegistrations = new();
+    private readonly List<IResourceRegistration> _resourceRegistrations = new();
+    private readonly List<ISamplingToolRegistration> _samplingToolRegistrations = new();
     private IProgrammaticAuthorizationPolicy? _authorizationPolicy;
     private bool _allowAllBoundCallers;
 
@@ -19,7 +21,7 @@ public sealed class ProgrammaticMcpBuilder
     {
         var builder = new CapabilityBuilder<TInput, TResult>(apiPath);
         configure(builder);
-        _registrations.Add(builder);
+        _capabilityRegistrations.Add(builder);
         return this;
     }
 
@@ -30,7 +32,29 @@ public sealed class ProgrammaticMcpBuilder
     {
         var builder = new MutationBuilder<TArgs, TPreview, TApplyResult>(apiPath);
         configure(builder);
-        _registrations.Add(builder);
+        _capabilityRegistrations.Add(builder);
+        return this;
+    }
+
+    /// <summary>
+    /// Registers a read-only resource with the supplied absolute URI.
+    /// </summary>
+    public ProgrammaticMcpBuilder AddResource(string uri, Action<ResourceBuilder> configure)
+    {
+        var builder = new ResourceBuilder(uri);
+        configure(builder);
+        _resourceRegistrations.Add(builder);
+        return this;
+    }
+
+    /// <summary>
+    /// Registers a dedicated sampling tool exposed only through the sampling loop.
+    /// </summary>
+    public ProgrammaticMcpBuilder AddSamplingTool<TArgs, TResult>(string name, Action<SamplingToolBuilder<TArgs, TResult>> configure)
+    {
+        var builder = new SamplingToolBuilder<TArgs, TResult>(name);
+        configure(builder);
+        _samplingToolRegistrations.Add(builder);
         return this;
     }
 
@@ -57,17 +81,22 @@ public sealed class ProgrammaticMcpBuilder
     /// </summary>
     public ProgrammaticCatalogSnapshot BuildCatalog()
     {
-        if (_registrations.OfType<IMutationRegistration>().Any() && _authorizationPolicy is null && !_allowAllBoundCallers)
+        if (_capabilityRegistrations.OfType<IMutationRegistration>().Any() && _authorizationPolicy is null && !_allowAllBoundCallers)
         {
             throw new InvalidOperationException(
                 "Mutations require an explicit authorization policy or an explicit AllowAllBoundCallers opt-in.");
         }
 
         var schemaGenerator = new BuiltInSchemaGenerator();
-        var registeredCapabilities = _registrations
+        var registeredCapabilities = _capabilityRegistrations
             .Select(registration => registration.BuildDefinition(schemaGenerator))
             .ToArray();
+        var registeredResources = _resourceRegistrations
+            .Select(registration => registration.BuildDefinition())
+            .OrderBy(static resource => resource.Definition.Uri, StringComparer.Ordinal)
+            .ToArray();
         BuilderValidation.ValidateCatalogPaths(registeredCapabilities.Select(static capability => capability.ApiPath).ToArray());
+        BuilderValidation.ValidateResourceUris(registeredResources.Select(static resource => resource.Definition.Uri).ToArray());
 
         var namingPlan = TypeScriptNamingPlan.Create(registeredCapabilities);
         foreach (var capability in registeredCapabilities)
@@ -83,7 +112,23 @@ public sealed class ProgrammaticMcpBuilder
         var generatedTypeScript = TypeScriptDeclarationGenerator.Generate(capabilities, namingPlan);
         var capabilityVersion = CapabilityVersionCalculator.Calculate(capabilities, generatedTypeScript);
         var authorizationPolicy = _authorizationPolicy ?? new AllowAllBoundCallersAuthorizationPolicy();
-        return new ProgrammaticCatalogSnapshot(capabilities, capabilityVersion, generatedTypeScript, authorizationPolicy);
+        _ = BuildSamplingToolRegistry(schemaGenerator);
+        return new ProgrammaticCatalogSnapshot(capabilities, registeredResources, capabilityVersion, generatedTypeScript, authorizationPolicy);
+    }
+
+    internal ProgrammaticSamplingToolRegistry BuildSamplingToolRegistry()
+    {
+        return BuildSamplingToolRegistry(new BuiltInSchemaGenerator());
+    }
+
+    private ProgrammaticSamplingToolRegistry BuildSamplingToolRegistry(BuiltInSchemaGenerator schemaGenerator)
+    {
+        var registeredSamplingTools = _samplingToolRegistrations
+            .Select(registration => registration.BuildDefinition(schemaGenerator))
+            .OrderBy(static tool => tool.Definition.Name, StringComparer.Ordinal)
+            .ToArray();
+        BuilderValidation.ValidateSamplingToolNames(registeredSamplingTools.Select(static tool => tool.Definition.Name).ToArray());
+        return new ProgrammaticSamplingToolRegistry(registeredSamplingTools);
     }
 }
 
@@ -405,6 +450,146 @@ internal interface ICapabilityRegistration
 /// </summary>
 internal interface IMutationRegistration
 {
+}
+
+internal interface IResourceRegistration
+{
+    RegisteredProgrammaticResource BuildDefinition();
+}
+
+internal interface ISamplingToolRegistration
+{
+    RegisteredProgrammaticSamplingTool BuildDefinition(BuiltInSchemaGenerator schemaGenerator);
+}
+
+/// <summary>
+/// Builder for a read-only MCP resource.
+/// </summary>
+public sealed class ResourceBuilder : IResourceRegistration
+{
+    private readonly string _uri;
+    private string? _name;
+    private string? _description;
+    private string? _mimeType;
+    private string? _text;
+    private Func<ProgrammaticResourceContext, ValueTask<string>>? _reader;
+
+    internal ResourceBuilder(string uri)
+    {
+        _uri = uri;
+    }
+
+    /// <summary>
+    /// Sets the human-readable name for the resource.
+    /// </summary>
+    public ResourceBuilder WithName(string name)
+    {
+        _name = name;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the human-readable description for the resource.
+    /// </summary>
+    public ResourceBuilder WithDescription(string description)
+    {
+        _description = description;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the MIME type advertised for the resource.
+    /// </summary>
+    public ResourceBuilder WithMimeType(string mimeType)
+    {
+        _mimeType = mimeType;
+        return this;
+    }
+
+    /// <summary>
+    /// Uses a static UTF-8 text payload for the resource.
+    /// </summary>
+    public ResourceBuilder WithText(string text)
+    {
+        _text = text;
+        return this;
+    }
+
+    /// <summary>
+    /// Uses a dynamic UTF-8 text reader for the resource.
+    /// </summary>
+    public ResourceBuilder WithReader(Func<ProgrammaticResourceContext, ValueTask<string>> reader)
+    {
+        _reader = reader;
+        return this;
+    }
+
+    RegisteredProgrammaticResource IResourceRegistration.BuildDefinition()
+    {
+        BuilderValidation.ValidateResourceUri(_uri);
+        BuilderValidation.ValidateRequiredText(_name, nameof(_name));
+        BuilderValidation.ValidateRequiredText(_description, nameof(_description));
+        BuilderValidation.ValidateMimeType(_mimeType);
+        BuilderValidation.ValidateExactlyOneResourceContentSource(_text, _reader);
+
+        var definition = new ProgrammaticResourceDefinition(_uri, _name!, _description!, _mimeType!);
+        var reader = _reader ?? (_ => ValueTask.FromResult(_text!));
+        return new RegisteredProgrammaticResource(definition, reader);
+    }
+}
+
+/// <summary>
+/// Builder for a sampling-only tool.
+/// </summary>
+public sealed class SamplingToolBuilder<TArgs, TResult> : ISamplingToolRegistration
+{
+    private readonly string _name;
+    private string? _description;
+    private Func<TArgs, ProgrammaticSamplingToolContext, ValueTask<TResult>>? _handler;
+
+    internal SamplingToolBuilder(string name)
+    {
+        _name = name;
+    }
+
+    /// <summary>
+    /// Sets the human-readable description for the sampling tool.
+    /// </summary>
+    public SamplingToolBuilder<TArgs, TResult> WithDescription(string description)
+    {
+        _description = description;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the sampling-tool handler.
+    /// </summary>
+    public SamplingToolBuilder<TArgs, TResult> WithHandler(Func<TArgs, ProgrammaticSamplingToolContext, ValueTask<TResult>> handler)
+    {
+        _handler = handler;
+        return this;
+    }
+
+    RegisteredProgrammaticSamplingTool ISamplingToolRegistration.BuildDefinition(BuiltInSchemaGenerator schemaGenerator)
+    {
+        BuilderValidation.ValidateSamplingToolName(_name);
+        BuilderValidation.ValidateRequiredText(_description, nameof(_description));
+        ArgumentNullException.ThrowIfNull(_handler);
+
+        var argsSchema = schemaGenerator.Generate(typeof(TArgs));
+        var resultSchema = schemaGenerator.Generate(typeof(TResult));
+        BuilderValidation.ValidateRootObjectSchema(argsSchema, "Sampling tool args");
+
+        return new RegisteredProgrammaticSamplingTool(
+            new ProgrammaticStructuredSamplingToolDefinition(_name, _description!, argsSchema),
+            resultSchema,
+            async (input, context) =>
+            {
+                var typedInput = JsonSerializerContract.DeserializeFromNode<TArgs>(input);
+                var result = await _handler(typedInput, context);
+                return JsonSerializerContract.SerializeToNode(result);
+            });
+    }
 }
 
 /// <summary>

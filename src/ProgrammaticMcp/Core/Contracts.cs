@@ -11,7 +11,7 @@ public static class ProgrammaticContractConstants
     /// <summary>
     /// Runtime contract version embedded into capability hashes and generated outputs.
     /// </summary>
-    public const string GeneratedRuntimeContractVersion = "programmatic-runtime-v1";
+    public const string GeneratedRuntimeContractVersion = "programmatic-runtime-v2";
 
     /// <summary>
     /// Schema version used by the public response envelopes.
@@ -107,6 +107,102 @@ public sealed record CapabilityParameter(string Name, JsonNode Schema, bool Requ
 /// Describes the CLR type and JSON schema for a capability payload.
 /// </summary>
 public sealed record CapabilityResult(Type ClrType, JsonNode Schema);
+
+/// <summary>
+/// Immutable definition of a registered MCP resource.
+/// </summary>
+public sealed record ProgrammaticResourceDefinition(
+    string Uri,
+    string Name,
+    string Description,
+    string MimeType);
+
+/// <summary>
+/// Runtime context passed to resource readers.
+/// </summary>
+public sealed record ProgrammaticResourceContext(
+    string Uri,
+    IServiceProvider Services,
+    CancellationToken CancellationToken);
+
+/// <summary>
+/// Result of reading a registered MCP resource.
+/// </summary>
+public sealed record ProgrammaticResourceReadResult(
+    string Uri,
+    string MimeType,
+    string Text);
+
+/// <summary>
+/// Single text message sent through the public sampling API.
+/// </summary>
+public sealed record ProgrammaticSamplingMessage(
+    string Role,
+    string Text);
+
+/// <summary>
+/// Request envelope for transport-neutral sampling.
+/// </summary>
+public sealed record ProgrammaticSamplingRequest(
+    string? SystemPrompt,
+    IReadOnlyList<ProgrammaticSamplingMessage> Messages,
+    bool EnableTools = false,
+    IReadOnlyList<string>? AllowedToolNames = null,
+    int? MaxTokens = null);
+
+/// <summary>
+/// Result envelope for transport-neutral sampling.
+/// </summary>
+public sealed record ProgrammaticSamplingResult(
+    string Text,
+    string Model,
+    string? StopReason);
+
+/// <summary>
+/// Runtime context passed to sampling-tool handlers.
+/// </summary>
+public sealed record ProgrammaticSamplingToolContext(
+    string ConversationId,
+    string? CallerBindingId,
+    IServiceProvider Services,
+    CancellationToken CancellationToken);
+
+/// <summary>
+/// Public host-facing abstraction for client sampling.
+/// </summary>
+public interface IProgrammaticSamplingClient
+{
+    /// <summary>Gets whether sampling is available in the current execution context.</summary>
+    bool IsSupported { get; }
+
+    /// <summary>Gets whether the current execution context supports tool-enabled sampling.</summary>
+    bool SupportsToolUse { get; }
+
+    /// <summary>Creates a sampled assistant message.</summary>
+    ValueTask<ProgrammaticSamplingResult> CreateMessageAsync(ProgrammaticSamplingRequest request, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Exception raised when sampling is blocked, unavailable, or fails with a structured programmatic code.
+/// </summary>
+public sealed class ProgrammaticSamplingException : Exception
+{
+    /// <summary>
+    /// Creates a new sampling exception.
+    /// </summary>
+    public ProgrammaticSamplingException(string code, string message, JsonObject? data = null, Exception? innerException = null)
+        : base(message, innerException)
+    {
+        Code = code;
+        Data = data;
+    }
+
+    /// <summary>Structured programmatic error code.</summary>
+    public string Code { get; }
+
+    /// <summary>Optional structured error data.</summary>
+    public new JsonObject? Data { get; }
+}
 
 /// <summary>
 /// Request envelope for capability search.
@@ -237,6 +333,21 @@ public sealed record ProgrammaticCapabilityContext(
     IServiceProvider Services,
     CancellationToken CancellationToken,
     IArtifactWriter? Artifacts = null);
+
+/// <summary>
+/// Helpers for retrieving contextual services from capability execution.
+/// </summary>
+public static class ProgrammaticCapabilityContextSamplingExtensions
+{
+    /// <summary>
+    /// Resolves the contextual sampling client for the supplied capability context.
+    /// </summary>
+    public static IProgrammaticSamplingClient GetSamplingClient(this ProgrammaticCapabilityContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return ProgrammaticSamplingServiceResolver.ResolvePublic(context.Services);
+    }
+}
 
 /// <summary>
 /// Runtime context passed to mutation handlers.
@@ -483,6 +594,181 @@ public sealed class MutationApplyResult<TApplyResult>
         new(false, default, code, message, MutationApplyFailureKind.Terminal);
 }
 
+internal interface IProgrammaticStructuredSamplingClient
+{
+    bool IsSupported { get; }
+
+    bool SupportsToolUse { get; }
+
+    ValueTask<ProgrammaticStructuredSamplingResult> CreateMessageAsync(
+        ProgrammaticStructuredSamplingRequest request,
+        CancellationToken cancellationToken = default);
+}
+
+internal sealed record ProgrammaticStructuredSamplingRequest(
+    string? SystemPrompt,
+    IReadOnlyList<ProgrammaticStructuredSamplingMessage> Messages,
+    int MaxTokens,
+    IReadOnlyList<ProgrammaticStructuredSamplingToolDefinition>? Tools = null,
+    ProgrammaticStructuredSamplingToolChoice? ToolChoice = null);
+
+internal sealed record ProgrammaticStructuredSamplingMessage(
+    string Role,
+    IReadOnlyList<ProgrammaticStructuredSamplingContentBlock> Content);
+
+internal abstract record ProgrammaticStructuredSamplingContentBlock;
+
+internal sealed record ProgrammaticStructuredSamplingTextBlock(string Text) : ProgrammaticStructuredSamplingContentBlock;
+
+internal sealed record ProgrammaticStructuredSamplingToolUseBlock(string Id, string Name, JsonNode? Input) : ProgrammaticStructuredSamplingContentBlock;
+
+internal sealed record ProgrammaticStructuredSamplingToolResultBlock(
+    string ToolUseId,
+    string Text,
+    bool IsError,
+    JsonNode? StructuredContent = null) : ProgrammaticStructuredSamplingContentBlock;
+
+internal sealed record ProgrammaticStructuredSamplingToolDefinition(
+    string Name,
+    string Description,
+    JsonNode InputSchema);
+
+internal sealed record ProgrammaticStructuredSamplingToolChoice(string Mode);
+
+internal sealed record ProgrammaticStructuredSamplingResult(
+    string Role,
+    IReadOnlyList<ProgrammaticStructuredSamplingContentBlock> Content,
+    string Model,
+    string? StopReason);
+
+internal sealed record RegisteredProgrammaticSamplingTool(
+    ProgrammaticStructuredSamplingToolDefinition Definition,
+    JsonNode ResultSchema,
+    Func<JsonObject, ProgrammaticSamplingToolContext, ValueTask<JsonNode?>> Handler);
+
+internal sealed record ProgrammaticSamplingToolExecutionResult(
+    string Text,
+    JsonNode? StructuredContent);
+
+internal sealed record ProgrammaticSamplingLoopLimits(
+    int MaxSamplingRounds,
+    int MaxSamplingToolResultBytes);
+
+internal static class ProgrammaticSamplingLoopLimitResolver
+{
+    public static ProgrammaticSamplingLoopLimits Default { get; } = new(12, 16_384);
+
+    public static ProgrammaticSamplingLoopLimits Resolve(IServiceProvider services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        return services.GetService(typeof(ProgrammaticSamplingLoopLimits)) as ProgrammaticSamplingLoopLimits ?? Default;
+    }
+}
+
+internal interface IProgrammaticSamplingToolRegistry
+{
+    IReadOnlyList<ProgrammaticStructuredSamplingToolDefinition> Tools { get; }
+
+    bool TryGetDefinition(string name, out ProgrammaticStructuredSamplingToolDefinition definition);
+
+    ValueTask<ProgrammaticSamplingToolExecutionResult> InvokeAsync(
+        string name,
+        JsonObject arguments,
+        ProgrammaticSamplingToolContext context,
+        CancellationToken cancellationToken = default);
+}
+
+internal sealed class ProgrammaticSamplingToolRegistry : IProgrammaticSamplingToolRegistry
+{
+    private readonly IReadOnlyList<ProgrammaticStructuredSamplingToolDefinition> _tools;
+    private readonly IReadOnlyDictionary<string, RegisteredProgrammaticSamplingTool> _toolsByName;
+
+    public ProgrammaticSamplingToolRegistry(IReadOnlyList<RegisteredProgrammaticSamplingTool> tools)
+    {
+        _tools = tools.Select(static tool => tool.Definition).ToArray();
+        _toolsByName = tools.ToDictionary(static tool => tool.Definition.Name, StringComparer.Ordinal);
+    }
+
+    public IReadOnlyList<ProgrammaticStructuredSamplingToolDefinition> Tools => _tools;
+
+    public bool TryGetDefinition(string name, out ProgrammaticStructuredSamplingToolDefinition definition)
+    {
+        if (_toolsByName.TryGetValue(name, out var tool))
+        {
+            definition = tool.Definition;
+            return true;
+        }
+
+        definition = null!;
+        return false;
+    }
+
+    public async ValueTask<ProgrammaticSamplingToolExecutionResult> InvokeAsync(
+        string name,
+        JsonObject arguments,
+        ProgrammaticSamplingToolContext context,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(arguments);
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (!_toolsByName.TryGetValue(name, out var tool))
+        {
+            throw new ProgrammaticSamplingException(
+                "sampling_invalid_tool_call",
+                $"Sampling tool '{name}' is not registered.");
+        }
+
+        JsonSchemaValidator.Validate(arguments, tool.Definition.InputSchema);
+        var result = await tool.Handler(arguments, context);
+        JsonSchemaValidator.Validate(result, tool.ResultSchema);
+        return new ProgrammaticSamplingToolExecutionResult(CanonicalJson.Serialize(result), result?.DeepClone());
+    }
+}
+
+internal static class ProgrammaticSamplingServiceResolver
+{
+    private static readonly IProgrammaticSamplingClient UnsupportedPublicClient = new UnsupportedProgrammaticSamplingClient();
+    private static readonly IProgrammaticStructuredSamplingClient UnsupportedStructuredClient = new UnsupportedProgrammaticStructuredSamplingClient();
+
+    public static IProgrammaticSamplingClient ResolvePublic(IServiceProvider services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        return services.GetService(typeof(IProgrammaticSamplingClient)) as IProgrammaticSamplingClient ?? UnsupportedPublicClient;
+    }
+
+    public static IProgrammaticStructuredSamplingClient ResolveStructured(IServiceProvider services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        return services.GetService(typeof(IProgrammaticStructuredSamplingClient)) as IProgrammaticStructuredSamplingClient ?? UnsupportedStructuredClient;
+    }
+
+    private sealed class UnsupportedProgrammaticSamplingClient : IProgrammaticSamplingClient
+    {
+        public bool IsSupported => false;
+
+        public bool SupportsToolUse => false;
+
+        public ValueTask<ProgrammaticSamplingResult> CreateMessageAsync(ProgrammaticSamplingRequest request, CancellationToken cancellationToken = default)
+            => ValueTask.FromException<ProgrammaticSamplingResult>(
+                new ProgrammaticSamplingException("sampling_unavailable", "Sampling is unavailable in this execution context."));
+    }
+
+    private sealed class UnsupportedProgrammaticStructuredSamplingClient : IProgrammaticStructuredSamplingClient
+    {
+        public bool IsSupported => false;
+
+        public bool SupportsToolUse => false;
+
+        public ValueTask<ProgrammaticStructuredSamplingResult> CreateMessageAsync(
+            ProgrammaticStructuredSamplingRequest request,
+            CancellationToken cancellationToken = default)
+            => ValueTask.FromException<ProgrammaticStructuredSamplingResult>(
+                new ProgrammaticSamplingException("sampling_unavailable", "Sampling is unavailable in this execution context."));
+    }
+}
+
 /// <summary>
 /// Immutable snapshot of the registered capabilities.
 /// </summary>
@@ -490,6 +776,9 @@ public interface ICapabilityCatalog
 {
     /// <summary>Registered capabilities.</summary>
     IReadOnlyList<CapabilityDefinition> Capabilities { get; }
+
+    /// <summary>Registered resources.</summary>
+    IReadOnlyList<ProgrammaticResourceDefinition> Resources { get; }
 
     /// <summary>Catalog capability version.</summary>
     string CapabilityVersion { get; }
@@ -504,6 +793,11 @@ public interface ICapabilityCatalog
     /// Searches the catalog.
     /// </summary>
     CapabilitySearchResponse Search(CapabilitySearchRequest request);
+
+    /// <summary>
+    /// Reads the resource registered for the supplied absolute URI.
+    /// </summary>
+    ValueTask<ProgrammaticResourceReadResult?> ReadResourceAsync(string uri, ProgrammaticResourceContext context);
 }
 
 /// <summary>
@@ -512,17 +806,25 @@ public interface ICapabilityCatalog
 public sealed class ProgrammaticCatalogSnapshot : ICapabilityCatalog
 {
     private readonly IReadOnlyList<CapabilityDefinition> _capabilities;
+    private readonly IReadOnlyList<ProgrammaticResourceDefinition> _resources;
+    private readonly IReadOnlyDictionary<string, Func<ProgrammaticResourceContext, ValueTask<string>>> _resourceReaders;
 
     /// <summary>
     /// Creates a new catalog snapshot.
     /// </summary>
-    public ProgrammaticCatalogSnapshot(
+    internal ProgrammaticCatalogSnapshot(
         IReadOnlyList<CapabilityDefinition> capabilities,
+        IReadOnlyList<RegisteredProgrammaticResource> resources,
         string capabilityVersion,
         string generatedTypeScript,
         IProgrammaticAuthorizationPolicy authorizationPolicy)
     {
         _capabilities = capabilities;
+        _resources = resources.Select(static resource => resource.Definition).ToArray();
+        _resourceReaders = resources.ToDictionary(
+            static resource => resource.Definition.Uri,
+            static resource => resource.Reader,
+            StringComparer.Ordinal);
         CapabilityVersion = capabilityVersion;
         GeneratedTypeScript = generatedTypeScript;
         AuthorizationPolicy = authorizationPolicy;
@@ -530,6 +832,9 @@ public sealed class ProgrammaticCatalogSnapshot : ICapabilityCatalog
 
     /// <inheritdoc />
     public IReadOnlyList<CapabilityDefinition> Capabilities => _capabilities;
+
+    /// <inheritdoc />
+    public IReadOnlyList<ProgrammaticResourceDefinition> Resources => _resources;
 
     /// <inheritdoc />
     public string CapabilityVersion { get; }
@@ -546,7 +851,26 @@ public sealed class ProgrammaticCatalogSnapshot : ICapabilityCatalog
         var matches = CapabilitySearchEngine.Search(_capabilities, CapabilityVersion, request);
         return matches;
     }
+
+    /// <inheritdoc />
+    public async ValueTask<ProgrammaticResourceReadResult?> ReadResourceAsync(string uri, ProgrammaticResourceContext context)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(uri);
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (!_resourceReaders.TryGetValue(uri, out var reader))
+        {
+            return null;
+        }
+
+        var text = await reader(context);
+        return new ProgrammaticResourceReadResult(uri, _resources.Single(resource => resource.Uri == uri).MimeType, text);
+    }
 }
+
+internal sealed record RegisteredProgrammaticResource(
+    ProgrammaticResourceDefinition Definition,
+    Func<ProgrammaticResourceContext, ValueTask<string>> Reader);
 
 internal static class CapabilitySearchEngine
 {

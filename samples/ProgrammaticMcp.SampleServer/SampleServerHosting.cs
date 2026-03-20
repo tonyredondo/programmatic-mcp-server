@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using ProgrammaticMcp.AspNetCore;
+using System.Text.Json;
 
 namespace ProgrammaticMcp.SampleServer;
 
@@ -64,6 +65,11 @@ public static class SampleServerHosting
                         types = "/mcp/types",
                         health = "/mcp/health"
                     },
+                    resourceUris = new[]
+                    {
+                        "sample://workspace/guide",
+                        "sample://workspace/projects"
+                    },
                     sampleIds = new
                     {
                         openTask = workspace.GetCurrentOpenTaskId(),
@@ -111,6 +117,44 @@ public static class SampleServerHosting
 
     private static void RegisterCatalog(ProgrammaticMcpBuilder catalog)
     {
+        catalog.AddResource(
+            "sample://workspace/guide",
+            resource => resource
+                .WithName("Sample workspace guide")
+                .WithDescription("Explains the sample workspace, capability flow, and available resources.")
+                .WithMimeType("text/markdown")
+                .WithText(
+                    """
+                    # Sample Workspace Guide
+
+                    This sample server demonstrates the programmatic MCP flow with a small in-memory task workspace.
+
+                    Use the six programmatic tools for progressive discovery and execution:
+                    - `capabilities.search`
+                    - `code.execute`
+                    - `artifact.read`
+                    - `mutation.list`
+                    - `mutation.apply`
+                    - `mutation.cancel`
+
+                    Available MCP resources:
+                    - `sample://workspace/guide`
+                    - `sample://workspace/projects`
+                    """));
+
+        catalog.AddResource(
+            "sample://workspace/projects",
+            resource => resource
+                .WithName("Sample project snapshot")
+                .WithDescription("Returns the current sample project list as JSON text.")
+                .WithMimeType("application/json")
+                .WithReader(
+                    context =>
+                    {
+                        var workspace = context.Services.GetRequiredService<SampleWorkspace>();
+                        return ValueTask.FromResult(JsonSerializer.Serialize(workspace.ListProjects(), JsonSerializerOptions.Web));
+                    }));
+
         catalog.AddCapability<ProjectsListInput, ProjectsListResult>(
             "projects.list",
             capability => capability

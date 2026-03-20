@@ -17,10 +17,27 @@ Send `initialize` to `/mcp`.
 Expected outcome:
 
 - the server advertises `/mcp/types`
+- the server advertises read-only sample resources through `resources/list`
 - the instructions mention caller binding requirements for mutation flows
 - the sample enables signed-header fallback and also sets a caller-binding cookie for localhost-style cookie-capable clients
 
-## 2. Discover The Capability Surface
+## 2. Inspect The Sample Resources
+
+Call `resources/list`.
+
+Expected outcome:
+
+- the list includes `sample://workspace/guide`
+- the list includes `sample://workspace/projects`
+
+Then call `resources/read` for `sample://workspace/guide`.
+
+Expected outcome:
+
+- `contents[0].mimeType = "text/markdown"`
+- `contents[0].text` contains `Sample Workspace Guide`
+
+## 3. Discover The Capability Surface
 
 Call `capabilities.search` with no query and `detailLevel = Full`.
 
@@ -32,7 +49,7 @@ Expected `apiPath` set:
 - `tasks.exportReport`
 - `tasks.complete`
 
-## 3. Execute Read-Only Code
+## 4. Execute Read-Only Code
 
 Call `code.execute` with:
 
@@ -49,7 +66,7 @@ Expected outcome:
 - `result.tasks.tasks` contains the `project-alpha` tasks
 - `result.task.taskId` is `task-1`
 
-## 4. Spill A Large Report To An Artifact
+## 5. Spill A Large Report To An Artifact
 
 Call `code.execute` with:
 
@@ -83,7 +100,7 @@ Expected outcome:
 - `kind = "execution.result"`
 - `items[0].text` contains the report payload
 
-## 5. Preview And Apply A Successful Mutation
+## 6. Preview And Apply A Successful Mutation
 
 Preview:
 
@@ -126,7 +143,7 @@ Expected `mutation.apply` outcome:
 - `status = "completed"`
 - `result.newStatus = "completed"`
 
-## 6. Show The Rejected Mutation Path
+## 7. Show The Rejected Mutation Path
 
 Preview the already completed task:
 
@@ -161,5 +178,6 @@ Expected `mutation.apply` outcome:
 
 - health checks are available at `/mcp/health`
 - the sample uses stateless HTTP MCP transport and relies on caller binding instead of MCP session identity
+- the sample demonstrates MCP resources, but not live sampling
 - browser-style CORS is off by default
 - the sample only enables localhost-oriented CORS when `SampleServer:Cors:EnableBrowserTooling = true`

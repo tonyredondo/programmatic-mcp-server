@@ -11,9 +11,11 @@ It explains what the library does, why it exists, how the main pieces fit togeth
 In this repository, "programmatic MCP" means:
 
 - MCP remains the integration protocol
+- read-only MCP resources stay available as separate MCP primitives when hosts need supplemental text
 - clients discover capabilities progressively instead of loading everything up front
 - clients generate code against a predictable API surface
 - that code runs in a constrained runtime
+- explicitly scoped read-only executions can request live MCP sampling from the connected client
 - large intermediate results spill into artifacts instead of staying inline
 - writes go through explicit approval-aware mutation flows
 
@@ -46,12 +48,14 @@ The implemented execution flow is:
 
 1. the host registers capabilities and mutations through `ProgrammaticMcpBuilder`
 2. the library builds a catalog snapshot, generated TypeScript declarations, and a `capabilityVersion`
-3. the transport exposes a small MCP tool surface
-4. the client uses discovery and `/types` to generate JavaScript against `globalThis.programmatic`
-5. `JintCodeExecutor` runs that JavaScript in a bounded runtime
-6. host capability calls are bridged back into the registered handlers
-7. large results spill into artifacts when they exceed the configured inline result limit
-8. write intents become approval records and are applied later through explicit mutation tools
+3. the transport exposes a small MCP tool surface plus optional read-only MCP resources
+4. the client can read those resources directly through `resources/list` and `resources/read`
+5. the client uses discovery and `/types` to generate JavaScript against `globalThis.programmatic`
+6. `JintCodeExecutor` runs that JavaScript in a bounded runtime
+7. explicitly scoped read-only executions can call `programmatic.client.sample(...)`, and capability handlers in the same scope can resolve a live sampling client
+8. host capability calls are bridged back into the registered handlers
+9. large results spill into artifacts when they exceed the configured inline result limit
+10. write intents become approval records and are applied later through explicit mutation tools
 
 The built-in runtime uses one Jint engine per request. Host capability calls are serialized inside a single execution.
 
@@ -68,7 +72,11 @@ The current MCP surface is intentionally small:
 
 Clients discover capabilities with `capabilities.search`, then fetch the generated declarations from `/types` when they want stronger code generation support.
 
+Resources are separate MCP primitives. They do not appear in `tools/list`, they do not change the generated TypeScript declarations, and they do not change `capabilityVersion`.
+
 Generated TypeScript and `capabilityVersion` come from the same catalog snapshot, so discovery and declarations stay aligned.
+
+Sampling tools are also separate from the capability catalog. They participate only in the live sampling loop and do not change generated declarations beyond the shared runtime contract surface.
 
 ## Artifact Flow
 
@@ -113,6 +121,14 @@ The ASP.NET Core layer currently supports caller binding through:
 - built-in signed cookie fallback
 - built-in signed-header fallback
 
+When the transport is stateful, the connected client can also advertise MCP sampling. In that case:
+
+- `programmatic.client.sample(...)` is available inside `code.execute`
+- `GetSamplingClient(...)` is available inside capability handlers
+- both paths require an explicit `VisibleApiPaths` scope
+- the effective visible scope must be read-only
+- stateless HTTP keeps sampling unavailable even if the client advertises it
+
 The built-in cookie fallback is:
 
 - route-scoped
@@ -141,10 +157,12 @@ The repository currently supports:
 - .NET 8 and .NET 10 library targets
 - `Jint` as the built-in JavaScript runtime
 - ASP.NET Core as the current transport adapter
+- live MCP sampling on the stateful ASP.NET transport when the connected client advertises the sampling capability
 - repository-validated client coverage for:
   - normal C# MCP SDK session identity
   - C# MCP SDK cookie fallback reconnect
   - C# MCP SDK signed-header fallback reconnect
+  - stateful C# MCP SDK sampling with a real session-backed sampling handler
   - raw HTTP cookie fallback reconnect
   - raw HTTP signed-header fallback reconnect
 
@@ -166,11 +184,11 @@ The repository does not currently try to provide:
 The main implementation is split into:
 
 - `src/ProgrammaticMcp`
-  Core contracts, catalog/builders, schema generation, hashing, approvals, artifacts, and shared envelopes.
+  Core contracts, catalog/builders, resource registration, schema generation, hashing, approvals, artifacts, and shared envelopes.
 - `src/ProgrammaticMcp.Jint`
   The built-in JavaScript runtime and bridge.
 - `src/ProgrammaticMcp.AspNetCore`
-  The ASP.NET Core transport adapter and HTTP-specific behavior.
+  The ASP.NET Core transport adapter, MCP resource handlers, and HTTP-specific behavior.
 - `samples/ProgrammaticMcp.SampleServer`
   The end-to-end reference host.
 - `tests/*`

@@ -15,6 +15,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -105,6 +106,15 @@ public sealed class ProgrammaticMcpServerOptions
     /// <summary>Gets or sets the graceful shutdown timeout used when draining in-flight work.</summary>
     public TimeSpan GracefulShutdownTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>Gets or sets the maximum number of live sampling rounds allowed per request.</summary>
+    public int MaxSamplingRounds { get; set; } = 12;
+
+    /// <summary>Gets or sets the maximum UTF-8 byte size of a serialized outbound sampling request.</summary>
+    public int MaxSamplingRequestBytes { get; set; } = 32_768;
+
+    /// <summary>Gets or sets the maximum UTF-8 byte size of a sampling tool result.</summary>
+    public int MaxSamplingToolResultBytes { get; set; } = 16_384;
+
     /// <summary>Invokes the catalog configuration callback.</summary>
     /// <param name="configure">Configures the capabilities that will be exposed by the server.</param>
     public void ConfigureCatalog(Action<ProgrammaticMcpBuilder> configure)
@@ -161,6 +171,11 @@ public sealed class ProgrammaticMcpServerOptions
             throw new InvalidOperationException("CompatibilityTextMirrorMaxBytes must be positive.");
         }
 
+        if (MaxSamplingRounds <= 0 || MaxSamplingRequestBytes <= 0 || MaxSamplingToolResultBytes <= 0)
+        {
+            throw new InvalidOperationException("Sampling limits must be positive.");
+        }
+
         ExecutorOptions.Validate();
     }
 }
@@ -193,6 +208,7 @@ public static class ProgrammaticMcpServiceCollectionExtensions
         configure(options);
         options.Validate();
 
+        var samplingTools = options.Builder.BuildSamplingToolRegistry();
         var catalog = options.Builder.BuildCatalog();
 
         services.AddDataProtection();
@@ -202,6 +218,7 @@ public static class ProgrammaticMcpServiceCollectionExtensions
         services.TryAddSingleton<ICapabilityCatalog>(catalog);
         services.TryAddSingleton(catalog);
         services.TryAddSingleton(options.ExecutorOptions);
+        services.TryAddSingleton(new ProgrammaticSamplingLoopLimits(options.MaxSamplingRounds, options.MaxSamplingToolResultBytes));
         services.TryAddSingleton<IArtifactStore>(sp => new InMemoryArtifactStore(sp.GetRequiredService<JintExecutorOptions>().ArtifactRetention));
         services.TryAddSingleton<IApprovalStore, InMemoryApprovalStore>();
         services.TryAddSingleton<ICodeExecutor>(
@@ -219,6 +236,8 @@ public static class ProgrammaticMcpServiceCollectionExtensions
         services.TryAddSingleton<ProgrammaticCallerBindingResolver>();
         services.TryAddSingleton<IProgrammaticCallerBindingTokenService>(sp => sp.GetRequiredService<ProgrammaticCallerBindingResolver>());
         services.TryAddSingleton<ProgrammaticToolSchemaRegistry>();
+        services.TryAddSingleton<IProgrammaticSamplingToolRegistry>(samplingTools);
+        services.TryAddSingleton(samplingTools);
         services.TryAddSingleton<ProgrammaticMcpToolHandlers>();
         services.TryAddSingleton<ProgrammaticMcpLifecycleService>();
         services.AddHostedService(sp => sp.GetRequiredService<ProgrammaticMcpLifecycleService>());
@@ -252,7 +271,8 @@ public static class ProgrammaticMcpServiceCollectionExtensions
                         routeState.TypeEndpointPath = resolvedRoutePrefix == "/"
                             ? "/" + runtimeOptions.TypeEndpointSegment
                             : resolvedRoutePrefix + "/" + runtimeOptions.TypeEndpointSegment;
-                        serverOptions.ServerInstructions = ProgrammaticInstructionsBuilder.Build(runtimeOptions, routeState);
+                        var catalog = httpContext.RequestServices.GetRequiredService<ICapabilityCatalog>();
+                        serverOptions.ServerInstructions = ProgrammaticInstructionsBuilder.Build(runtimeOptions, routeState, catalog);
                         await callerBindingResolver.IssueInitialCookieAsync(httpContext, cancellationToken);
                         await Task.CompletedTask;
                     };
@@ -262,6 +282,18 @@ public static class ProgrammaticMcpServiceCollectionExtensions
                 {
                     var handlers = context.Services!.GetRequiredService<ProgrammaticMcpToolHandlers>();
                     return await handlers.ListToolsAsync(context, cancellationToken);
+                })
+            .WithListResourcesHandler(
+                static async (context, cancellationToken) =>
+                {
+                    var handlers = context.Services!.GetRequiredService<ProgrammaticMcpToolHandlers>();
+                    return await handlers.ListResourcesAsync(context, cancellationToken);
+                })
+            .WithReadResourceHandler(
+                static async (context, cancellationToken) =>
+                {
+                    var handlers = context.Services!.GetRequiredService<ProgrammaticMcpToolHandlers>();
+                    return await handlers.ReadResourceAsync(context, cancellationToken);
                 })
             .WithCallToolHandler(
                 static async (context, cancellationToken) =>
@@ -908,11 +940,18 @@ internal sealed class ProgrammaticToolSchemaRegistry
 
 internal static class ProgrammaticInstructionsBuilder
 {
-    public static string Build(ProgrammaticMcpServerOptions options, ProgrammaticMcpRouteState routeState)
+    public static string Build(ProgrammaticMcpServerOptions options, ProgrammaticMcpRouteState routeState, ICapabilityCatalog catalog)
     {
+        var resourcesText = catalog.Resources.Count > 0
+            ? " Read-only MCP resources are also available via resources/list and resources/read."
+            : string.Empty;
+        var samplingText = options.EnableStatefulHttpTransport
+            ? " MCP sampling is optional and depends on client support. When the connected client advertises it, explicitly scoped read-only code.execute runs can call programmatic.client.sample(...), and capability handlers in that same explicit read-only VisibleApiPaths scope can resolve a live sampling client."
+            : string.Empty;
+
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"Programmatic MCP flow: initialize -> tools/list -> capabilities.search -> code.execute -> artifact.read when needed -> mutation.list/apply/cancel for writes. Types: GET {routeState.TypeEndpointPath}. Mutations require stable caller binding via {DescribeCallerBinding(options)}. conversationId must match ^[A-Za-z0-9._:-]{{1,128}}$. code.execute is synchronous request/response in v0. Limits: timeoutMs={options.ExecutorOptions.TimeoutMs}, maxApiCalls={options.ExecutorOptions.MaxApiCalls}, maxResultBytes={options.ExecutorOptions.MaxResultBytes}, maxStatements={options.ExecutorOptions.MaxStatements}, memoryBytes={options.ExecutorOptions.MemoryBytes}, maxCodeBytes={options.ExecutorOptions.MaxCodeBytes}, maxArgsBytes={options.ExecutorOptions.MaxArgsBytes}, maxConsoleLines={options.ExecutorOptions.MaxConsoleLines}, maxConsoleBytes={options.ExecutorOptions.MaxConsoleBytes}.");
+            $"Programmatic MCP flow: initialize -> tools/list -> capabilities.search -> code.execute -> artifact.read when needed -> mutation.list/apply/cancel for writes. Types: GET {routeState.TypeEndpointPath}.{resourcesText}{samplingText} Mutations require stable caller binding via {DescribeCallerBinding(options)}. conversationId must match ^[A-Za-z0-9._:-]{{1,128}}$. code.execute is synchronous request/response in v0. Limits: timeoutMs={options.ExecutorOptions.TimeoutMs}, maxApiCalls={options.ExecutorOptions.MaxApiCalls}, maxResultBytes={options.ExecutorOptions.MaxResultBytes}, maxStatements={options.ExecutorOptions.MaxStatements}, memoryBytes={options.ExecutorOptions.MemoryBytes}, maxCodeBytes={options.ExecutorOptions.MaxCodeBytes}, maxArgsBytes={options.ExecutorOptions.MaxArgsBytes}, maxConsoleLines={options.ExecutorOptions.MaxConsoleLines}, maxConsoleBytes={options.ExecutorOptions.MaxConsoleBytes}.");
     }
 
     private static string DescribeCallerBinding(ProgrammaticMcpServerOptions options)
@@ -1022,6 +1061,7 @@ internal sealed class ProgrammaticMcpLifecycleService(
 internal sealed class ProgrammaticMcpToolHandlers(
     ProgrammaticMcpServerOptions options,
     ICapabilityCatalog catalog,
+    IProgrammaticSamplingToolRegistry samplingTools,
     ICodeExecutionService executionService,
     IArtifactStore artifactStore,
     IApprovalStore approvalStore,
@@ -1038,6 +1078,72 @@ internal sealed class ProgrammaticMcpToolHandlers(
         using var activity = activitySource.Start("programmatic.tools.list");
         activity?.SetTag("programmatic.capabilityVersion", catalog.CapabilityVersion);
         return ValueTask.FromResult(new ListToolsResult { Tools = schemas.CreateTools() });
+    }
+
+    public ValueTask<ListResourcesResult> ListResourcesAsync(RequestContext<ListResourcesRequestParams> context, CancellationToken cancellationToken)
+    {
+        using var activity = activitySource.Start("programmatic.resources.list");
+        activity?.SetTag("programmatic.capabilityVersion", catalog.CapabilityVersion);
+        activity?.SetTag("programmatic.resourceCount", catalog.Resources.Count);
+
+        return ValueTask.FromResult(
+            new ListResourcesResult
+            {
+                Resources = catalog.Resources
+                    .Select(
+                        static resource => new Resource
+                        {
+                            Uri = resource.Uri,
+                            Name = resource.Name,
+                            Description = resource.Description,
+                            MimeType = resource.MimeType
+                        })
+                    .ToList()
+            });
+    }
+
+    public async ValueTask<ReadResourceResult> ReadResourceAsync(RequestContext<ReadResourceRequestParams> context, CancellationToken cancellationToken)
+    {
+        var uri = context.Params?.Uri;
+        if (string.IsNullOrWhiteSpace(uri))
+        {
+            throw new InvalidOperationException("uri is required.");
+        }
+
+        using var activity = activitySource.Start("programmatic.resources.read");
+        activity?.SetTag("programmatic.capabilityVersion", catalog.CapabilityVersion);
+        activity?.SetTag("programmatic.resourceUri", uri);
+
+        using var resourceScope = context.Services?.CreateScope();
+        var blockedResourceClient = FixedProgrammaticSamplingClient.Blocked(
+            "sampling_not_allowed_in_resource_context",
+            "Sampling is not allowed while reading resources.");
+        var resourceServices = ProgrammaticSamplingServiceOverlay.Create(
+            resourceScope?.ServiceProvider ?? context.Services!,
+            blockedResourceClient,
+            blockedResourceClient);
+        var resourceContext = new ProgrammaticResourceContext(
+            uri,
+            resourceServices,
+            cancellationToken);
+        var resource = await catalog.ReadResourceAsync(uri, resourceContext);
+        if (resource is null)
+        {
+            throw new McpProtocolException($"Resource '{uri}' was not found.", McpErrorCode.ResourceNotFound);
+        }
+
+        return new ReadResourceResult
+        {
+            Contents =
+            [
+                new TextResourceContents
+                {
+                    Uri = resource.Uri,
+                    MimeType = resource.MimeType,
+                    Text = resource.Text
+                }
+            ]
+        };
     }
 
     public async ValueTask<CallToolResult> CallToolAsync(RequestContext<CallToolRequestParams> context, CancellationToken cancellationToken)
@@ -1170,19 +1276,26 @@ internal sealed class ProgrammaticMcpToolHandlers(
         using var throttleLease = throttleDecision.Lease;
         using var executionScope = context.Services?.CreateScope();
         using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, shutdownCoordinator.ForcedCancellationToken);
+        var visibleApiPaths = args["visibleApiPaths"] is JsonArray visible ? visible.Select(static node => node!.GetValue<string>()).ToArray() : null;
+        var executionServices = CreateExecutionSamplingServices(
+            context,
+            executionScope?.ServiceProvider ?? context.Services!,
+            conversationId,
+            binding.CallerBindingId,
+            visibleApiPaths);
         var request = new CodeExecutionRequest(
             conversationId,
             code,
             args["entrypoint"]?.GetValue<string>() ?? "main",
             args["args"] as JsonObject,
-            args["visibleApiPaths"] is JsonArray visible ? visible.Select(static node => node!.GetValue<string>()).ToArray() : null,
+            visibleApiPaths,
             args["timeoutMs"]?.GetValue<int?>(),
             args["maxApiCalls"]?.GetValue<int?>(),
             args["maxResultBytes"]?.GetValue<int?>(),
             args["maxStatements"]?.GetValue<int?>(),
             args["memoryBytes"]?.GetValue<int?>(),
             binding.CallerBindingId,
-            executionScope?.ServiceProvider ?? context.Services,
+            executionServices,
             context.User);
 
         try
@@ -1407,11 +1520,18 @@ internal sealed class ProgrammaticMcpToolHandlers(
             options.ExecutorOptions.ArtifactRetention.ArtifactChunkBytes);
         using var applyScope = context.Services?.CreateScope();
         using var applyCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, shutdownCoordinator.ForcedCancellationToken);
+        var blockedMutationClient = FixedProgrammaticSamplingClient.Blocked(
+            "sampling_not_allowed_in_mutation_context",
+            "Sampling is not allowed while applying mutations.");
+        var mutationServices = ProgrammaticSamplingServiceOverlay.Create(
+            applyScope?.ServiceProvider ?? context.Services!,
+            blockedMutationClient,
+            blockedMutationClient);
         var mutationContext = new ProgrammaticMutationContext(
             conversationId,
             binding.CallerBindingId,
             approvalId,
-            applyScope?.ServiceProvider ?? context.Services!,
+            mutationServices,
             applyCancellation.Token,
             writer);
 
@@ -1675,6 +1795,46 @@ internal sealed class ProgrammaticMcpToolHandlers(
         conversationId = value;
         error = null;
         return true;
+    }
+
+    private IServiceProvider CreateExecutionSamplingServices(
+        RequestContext<CallToolRequestParams> context,
+        IServiceProvider innerServices,
+        string conversationId,
+        string? callerBindingId,
+        IReadOnlyList<string>? visibleApiPaths)
+    {
+        if (visibleApiPaths is null)
+        {
+            var blockedClient = FixedProgrammaticSamplingClient.Blocked(
+                "sampling_requires_explicit_read_only_scope",
+                "Sampling requires an explicit VisibleApiPaths scope.");
+            return ProgrammaticSamplingServiceOverlay.Create(innerServices, blockedClient, blockedClient);
+        }
+
+        var visibleMutations = new HashSet<string>(visibleApiPaths, StringComparer.Ordinal);
+        if (catalog.Capabilities.Any(capability => capability.IsMutation && visibleMutations.Contains(capability.ApiPath)))
+        {
+            var blockedClient = FixedProgrammaticSamplingClient.Blocked(
+                "sampling_not_allowed_with_visible_mutations",
+                "Sampling is not allowed when visible capabilities include mutations.");
+            return ProgrammaticSamplingServiceOverlay.Create(innerServices, blockedClient, blockedClient);
+        }
+
+        if (!options.EnableStatefulHttpTransport || context.Server is null)
+        {
+            var unavailableClient = FixedProgrammaticSamplingClient.Unsupported("Sampling is unavailable in this transport context.");
+            return ProgrammaticSamplingServiceOverlay.Create(innerServices, unavailableClient, unavailableClient);
+        }
+
+        var liveClient = new LiveProgrammaticSamplingClient(
+            context.Server,
+            samplingTools,
+            innerServices,
+            options,
+            conversationId,
+            callerBindingId);
+        return ProgrammaticSamplingServiceOverlay.Create(innerServices, liveClient, liveClient);
     }
 
     private CallToolResult CreateSuccess<T>(T payload)

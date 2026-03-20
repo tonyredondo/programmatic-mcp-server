@@ -78,6 +78,190 @@ public sealed class CoreContractsTests
     }
 
     [Fact]
+    public void ClientNamespaceIsReserved()
+    {
+        var builder = new ProgrammaticMcpBuilder();
+
+        builder.AddCapability<ListProjectsInput, ListProjectsResult>(
+            "client.list",
+            capability => capability
+                .WithDescription("bad")
+                .UseWhen("never")
+                .DoNotUseWhen("always")
+                .WithHandler((_, _) => ValueTask.FromResult(new ListProjectsResult(Array.Empty<string>()))));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => builder.BuildCatalog());
+        Assert.Contains("client", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ResourceRegistrationValidationRejectsInvalidDefinitions()
+    {
+        var missingContent = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddResource(
+                "sample://docs/guide",
+                resource => resource
+                    .WithName("Guide")
+                    .WithDescription("A guide.")
+                    .WithMimeType("text/markdown"));
+
+        Assert.Contains("Exactly one resource content source", Assert.Throws<InvalidOperationException>(() => missingContent.BuildCatalog()).Message, StringComparison.Ordinal);
+
+        var duplicateUri = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddResource(
+                "sample://docs/guide",
+                resource => resource
+                    .WithName("Guide")
+                    .WithDescription("A guide.")
+                    .WithMimeType("text/markdown")
+                    .WithText("# Guide"))
+            .AddResource(
+                "sample://docs/guide",
+                resource => resource
+                    .WithName("Duplicate")
+                    .WithDescription("A duplicate.")
+                    .WithMimeType("text/markdown")
+                    .WithText("# Duplicate"));
+
+        Assert.Contains("registered more than once", Assert.Throws<InvalidOperationException>(() => duplicateUri.BuildCatalog()).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ResourcesAreSortedAndDoNotChangeCapabilityVersion()
+    {
+        var baseline = CreateCatalogWithOptionalResources(includeResources: false);
+        var withResources = CreateCatalogWithOptionalResources(includeResources: true);
+
+        Assert.Equal(baseline.CapabilityVersion, withResources.CapabilityVersion);
+        Assert.Equal(
+            new[]
+            {
+                "sample://docs/alpha",
+                "sample://docs/zeta"
+            },
+            withResources.Resources.Select(static resource => resource.Uri).ToArray());
+
+        var result = await withResources.ReadResourceAsync(
+            "sample://docs/alpha",
+            new ProgrammaticResourceContext("sample://docs/alpha", NullServiceProvider.Instance, CancellationToken.None));
+
+        Assert.NotNull(result);
+        Assert.Equal("application/json", result!.MimeType);
+        Assert.Contains("alpha", result.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SamplingToolsAreValidatedAndDoNotChangeCapabilityVersion()
+    {
+        var baseline = CreateCatalogWithOptionalSamplingTools(includeSamplingTools: false);
+        var withSamplingTools = CreateCatalogWithOptionalSamplingTools(includeSamplingTools: true);
+        var samplingRegistry = CreateBuilderWithOptionalSamplingTools(includeSamplingTools: true).BuildSamplingToolRegistry();
+
+        Assert.Equal(baseline.CapabilityVersion, withSamplingTools.CapabilityVersion);
+        Assert.Equal(baseline.GeneratedTypeScript, withSamplingTools.GeneratedTypeScript);
+        Assert.Single(samplingRegistry.Tools);
+        Assert.Equal("clock.read", samplingRegistry.Tools[0].Name);
+    }
+
+    [Fact]
+    public void SamplingToolRegistrationRejectsDuplicateNamesAndNonObjectSchemas()
+    {
+        var duplicateBuilder = CreateBuilderWithOptionalSamplingTools(includeSamplingTools: false)
+            .AddSamplingTool<ReadClockInput, ReadClockResult>(
+                "clock.read",
+                tool => tool
+                    .WithDescription("Reads the current clock.")
+                    .WithHandler((_, _) => ValueTask.FromResult(new ReadClockResult("09:30"))))
+            .AddSamplingTool<ReadClockInput, ReadClockResult>(
+                "clock.read",
+                tool => tool
+                    .WithDescription("Reads the clock again.")
+                    .WithHandler((_, _) => ValueTask.FromResult(new ReadClockResult("10:30"))));
+
+        Assert.Contains("registered more than once", Assert.Throws<InvalidOperationException>(() => duplicateBuilder.BuildCatalog()).Message, StringComparison.Ordinal);
+
+        var scalarSchemaBuilder = CreateBuilderWithOptionalSamplingTools(includeSamplingTools: false)
+            .AddSamplingTool<string, ReadClockResult>(
+                "clock.scalar",
+                tool => tool
+                    .WithDescription("Invalid scalar input schema.")
+                    .WithHandler((_, _) => ValueTask.FromResult(new ReadClockResult("09:30"))));
+
+        Assert.Contains("root schema of type 'object'", Assert.Throws<InvalidOperationException>(() => scalarSchemaBuilder.BuildCatalog()).Message, StringComparison.Ordinal);
+    }
+
+    private static ProgrammaticCatalogSnapshot CreateCatalogWithOptionalResources(bool includeResources)
+    {
+        var builder = CreateBuilderWithOptionalSamplingTools(includeSamplingTools: false);
+
+        if (includeResources)
+        {
+            builder
+                .AddResource(
+                    "sample://docs/zeta",
+                    resource => resource
+                        .WithName("Zeta")
+                        .WithDescription("Zeta resource.")
+                        .WithMimeType("text/plain")
+                        .WithText("zeta"))
+                .AddResource(
+                    "sample://docs/alpha",
+                    resource => resource
+                        .WithName("Alpha")
+                        .WithDescription("Alpha resource.")
+                        .WithMimeType("application/json")
+                        .WithText("""{"name":"alpha"}"""));
+        }
+
+        return builder.BuildCatalog();
+    }
+
+    private static ProgrammaticCatalogSnapshot CreateCatalogWithOptionalSamplingTools(bool includeSamplingTools)
+        => CreateBuilderWithOptionalSamplingTools(includeSamplingTools).BuildCatalog();
+
+    private static ProgrammaticMcpBuilder CreateBuilderWithOptionalSamplingTools(bool includeSamplingTools)
+    {
+        var builder = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddCapability<ListProjectsInput, ListProjectsResult>(
+                "projects.list",
+                capability => capability
+                    .WithDescription("Lists projects.")
+                    .UseWhen("You need to inspect projects.")
+                    .DoNotUseWhen("You need to mutate data.")
+                    .WithHandler((_, _) => ValueTask.FromResult(new ListProjectsResult(Array.Empty<string>()))))
+            .AddCapability<GetProjectInput, GetProjectResult>(
+                "projects.getById",
+                capability => capability
+                    .WithDescription("Gets a project by id.")
+                    .UseWhen("You need one project.")
+                    .DoNotUseWhen("You need a list.")
+                    .WithHandler((input, _) => ValueTask.FromResult(new GetProjectResult(input.ProjectId, "example"))))
+            .AddMutation<CompleteTaskArgs, CompleteTaskPreview, CompleteTaskApplyResult>(
+                "tasks.complete",
+                mutation => mutation
+                    .WithDescription("Completes a task.")
+                    .UseWhen("You are sure the task should be completed.")
+                    .DoNotUseWhen("You are only exploring.")
+                    .WithPreviewHandler((args, _) => ValueTask.FromResult(new CompleteTaskPreview(args.TaskId, true)))
+                    .WithSummaryFactory((args, _, _) => ValueTask.FromResult($"Complete {args.TaskId}"))
+                    .WithApplyHandler((args, _) => ValueTask.FromResult(MutationApplyResult<CompleteTaskApplyResult>.Success(new CompleteTaskApplyResult(args.TaskId, "done")))));
+
+        if (includeSamplingTools)
+        {
+            builder.AddSamplingTool<ReadClockInput, ReadClockResult>(
+                "clock.read",
+                tool => tool
+                    .WithDescription("Reads the current clock.")
+                    .WithHandler((_, _) => ValueTask.FromResult(new ReadClockResult("09:30"))));
+        }
+
+        return builder;
+    }
+
+    [Fact]
     public void MutationsRequireExplicitAuthorizationChoice()
     {
         var builder = new ProgrammaticMcpBuilder();
@@ -694,6 +878,10 @@ public sealed class CoreContractsTests
 
     public sealed record CompleteTaskApplyResult(string TaskId, string Status);
 
+    public sealed record ReadClockInput(string TimeZone);
+
+    public sealed record ReadClockResult(string CurrentTime);
+
     public sealed record EmptyInput();
 
     public sealed record SchemaFixture(
@@ -757,4 +945,11 @@ public sealed class CoreContractsTests
     public sealed record SharedLeaf(string Value);
 
     public sealed record UnsupportedFixture(JsonElement Raw);
+
+    private sealed class NullServiceProvider : IServiceProvider
+    {
+        public static NullServiceProvider Instance { get; } = new();
+
+        public object? GetService(Type serviceType) => null;
+    }
 }
