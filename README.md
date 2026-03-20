@@ -42,7 +42,7 @@ At a high level, the implemented flow is:
 7. read large results through `artifact.read`
 8. preview and apply writes through `mutation.list`, `mutation.apply`, and `mutation.cancel`
 
-For a fuller explanation of the execution model, artifact flow, approval flow, transport model, and supported scope, see [docs/overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md).
+For a fuller explanation of the execution model, artifact flow, approval flow, transport model, and supported scope, see [docs/overview.md](docs/overview.md).
 
 ## Package Layout
 
@@ -57,7 +57,7 @@ The repository currently ships three library packages and one sample server:
 - `samples/ProgrammaticMcp.SampleServer`
   A reference host used to prove the full loop end to end.
 
-Package-specific notes live under [docs/packages](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/packages/README.md).
+Package-specific notes live under [docs/packages](docs/packages/README.md).
 
 ## Minimal Host Example
 
@@ -165,7 +165,7 @@ Example mutation apply request:
 }
 ```
 
-The full end-to-end transcript lives in [docs/sample-transcript.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/sample-transcript.md).
+The full end-to-end transcript lives in [docs/sample-transcript.md](docs/sample-transcript.md).
 
 ## Supported Scope
 
@@ -177,7 +177,7 @@ The current implementation supports:
 - in-memory built-in approval and artifact stores
 - HTTP caller binding through authenticated principal, MCP session identity, signed cookie fallback, or signed-header fallback
 
-Compatibility details and validated client paths are documented in [docs/client-compatibility.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/client-compatibility.md).
+Compatibility details and validated client paths are documented in [docs/client-compatibility.md](docs/client-compatibility.md).
 
 ## Not Supported
 
@@ -192,17 +192,17 @@ The repository does not currently provide:
 
 ## Documentation Map
 
-- [docs/overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md)
+- [docs/overview.md](docs/overview.md)
   System overview: what the library does, why it exists, how it works, and what is supported.
-- [docs/client-flow.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/client-flow.md)
+- [docs/client-flow.md](docs/client-flow.md)
   The client-side interaction flow.
-- [docs/security.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/security.md)
+- [docs/security.md](docs/security.md)
   Security model, caller binding, and host responsibilities.
-- [docs/client-compatibility.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/client-compatibility.md)
+- [docs/client-compatibility.md](docs/client-compatibility.md)
   Validated client paths and reconnect expectations.
-- [docs/sample-transcript.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/sample-transcript.md)
+- [docs/sample-transcript.md](docs/sample-transcript.md)
   The sample server’s end-to-end transcript.
-- [docs/packages/README.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/packages/README.md)
+- [docs/packages/README.md](docs/packages/README.md)
   Package-specific reference notes.
-- [docs/spikes/jint-runtime-proof.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/spikes/jint-runtime-proof.md)
+- [docs/spikes/jint-runtime-proof.md](docs/spikes/jint-runtime-proof.md)
   Historical runtime proof notes for the Jint async model.

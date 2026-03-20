@@ -2,7 +2,7 @@
 
 This document records the compatibility state for the first implementation milestone of the v0 HTTP MCP integration.
 
-For the broader repository scope and transport model, see [overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md).
+For the broader repository scope and transport model, see [overview.md](overview.md).
 
 ## Repository-Validated Clients
 

@@ -2,7 +2,7 @@
 
 This document describes the current v0 security model.
 
-For the broader execution and transport model, see [overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md).
+For the broader execution and transport model, see [overview.md](overview.md).
 
 ## Built-In Runtime Boundary
 

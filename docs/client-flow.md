@@ -2,7 +2,7 @@
 
 This document describes the current v0 code-mode client flow exposed by the repository.
 
-For the broader system model and supported scope, see [overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md).
+For the broader system model and supported scope, see [overview.md](overview.md).
 
 ## Sequence
 

@@ -148,7 +148,7 @@ The repository currently supports:
   - raw HTTP cookie fallback reconnect
   - raw HTTP signed-header fallback reconnect
 
-For the exact compatibility matrix, see [docs/client-compatibility.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/client-compatibility.md).
+For the exact compatibility matrix, see [docs/client-compatibility.md](client-compatibility.md).
 
 ## Not Supported
 
@@ -178,13 +178,13 @@ The main implementation is split into:
 
 ## Where To Go Next
 
-- [README.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/README.md)
+- [README.md](../README.md)
   Repository entry point and quickstart.
-- [docs/client-flow.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/client-flow.md)
+- [docs/client-flow.md](client-flow.md)
   Client interaction flow.
-- [docs/security.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/security.md)
+- [docs/security.md](security.md)
   Security model and host responsibilities.
-- [docs/sample-transcript.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/sample-transcript.md)
+- [docs/sample-transcript.md](sample-transcript.md)
   Concrete end-to-end sample flow.
-- [docs/packages/README.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/packages/README.md)
+- [docs/packages/README.md](packages/README.md)
   Package-specific notes.

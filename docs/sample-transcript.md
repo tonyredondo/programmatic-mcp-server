@@ -2,7 +2,7 @@
 
 This transcript shows the intended end-to-end loop against `samples/ProgrammaticMcp.SampleServer`.
 
-For the broader repository overview, see [overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md).
+For the broader repository overview, see [overview.md](overview.md).
 
 The sample uses the in-memory task domain with these stable ids:
 

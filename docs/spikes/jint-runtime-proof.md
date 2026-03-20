@@ -8,11 +8,11 @@ Passed.
 
 - `Jint` `4.6.3`
 
-This version is pinned in [Directory.Packages.props](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/Directory.Packages.props).
+This version is pinned in [Directory.Packages.props](../../Directory.Packages.props).
 
 ## What The Proof Covered
 
-The harness in [RuntimeProofHarness.cs](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/src/ProgrammaticMcp.Jint/Spike/RuntimeProofHarness.cs) and the tests in [RuntimeProofHarnessTests.cs](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/tests/ProgrammaticMcp.Jint.Tests/RuntimeProofHarnessTests.cs) verified:
+The harness in [RuntimeProofHarness.cs](../../src/ProgrammaticMcp.Jint/Spike/RuntimeProofHarness.cs) and the tests in [RuntimeProofHarnessTests.cs](../../tests/ProgrammaticMcp.Jint.Tests/RuntimeProofHarnessTests.cs) verified:
 
 - async entrypoints can return awaited values correctly
 - explicit promise unwrapping works through `UnwrapIfPromiseAsync`
