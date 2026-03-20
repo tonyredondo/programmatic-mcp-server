@@ -124,6 +124,7 @@ The sample domain is intentionally small and in-memory. It exposes these exact c
 - `projects.list`
 - `tasks.list`
 - `tasks.getById`
+- `tasks.summarizeWithSampling`
 - `tasks.exportReport`
 - `tasks.complete`
 
@@ -132,7 +133,11 @@ The sample also exposes these exact MCP resources:
 - `sample://workspace/guide`
 - `sample://workspace/projects`
 
-The sample runs MCP over stateless HTTP, enables signed-header caller binding, and also issues the built-in caller-binding cookie for localhost-style cookie-capable clients.
+The sample also exposes this exact sampling tool:
+
+- `tasks.readForSampling`
+
+The sample runs over the stateful ASP.NET MCP transport, so session-backed clients can use live sampling. It still enables signed-header caller binding and also issues the built-in caller-binding cookie for localhost-style cookie-capable clients.
 
 ## Sample Flow
 
@@ -141,8 +146,10 @@ The short version of the sample flow is:
 1. optionally inspect sample resources with `resources/list` and `resources/read`
 2. discover capabilities with `capabilities.search`
 3. execute generated code with `code.execute`
-4. read spilled report output with `artifact.read`
-5. preview, list, and apply a mutation with `code.execute`, `mutation.list`, and `mutation.apply`
+4. run live sampling from JavaScript with `programmatic.client.sample(...)` inside an explicit read-only scope
+5. run capability-handler sampling through `tasks.summarizeWithSampling`
+6. read spilled report output with `artifact.read`
+7. preview, list, and apply a mutation with `code.execute`, `mutation.list`, and `mutation.apply`
 
 Clients must provide a `conversationId` that matches `^[A-Za-z0-9._:-]{1,128}$`.
 
@@ -155,7 +162,27 @@ Example `code.execute` body:
 }
 ```
 
-The sample does not demonstrate live sampling. It runs over stateless HTTP, so `programmatic.client.sample(...)` remains unavailable there even though the shared generated runtime includes that helper for stateful ASP.NET hosts.
+When a stateful MCP client advertises sampling support, the sample demonstrates both `programmatic.client.sample(...)` and capability-handler sampling through `GetSamplingClient(...)`.
+
+Example live-sampling execution:
+
+```json
+{
+  "conversationId": "sample-js-sampling",
+  "visibleApiPaths": [],
+  "code": "async function main() { return await programmatic.client.sample({ messages: [{ role: 'user', text: 'Summarize task task-1 for the sample flow.' }], enableTools: true, allowedToolNames: ['tasks.readForSampling'] }); }"
+}
+```
+
+Example capability-handler sampling execution:
+
+```json
+{
+  "conversationId": "sample-handler-sampling",
+  "visibleApiPaths": ["tasks.summarizeWithSampling"],
+  "code": "async function main() { return await programmatic.tasks.summarizeWithSampling({ taskId: 'task-4' }); }"
+}
+```
 
 Example report-spill execution:
 

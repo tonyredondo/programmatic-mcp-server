@@ -1,8 +1,8 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
 using ProgrammaticMcp.AspNetCore;
 using System.Text.Json;
 
@@ -35,7 +35,7 @@ public static class SampleServerHosting
             {
                 options.ServerName = "ProgrammaticMcp.SampleServer";
                 options.ServerVersion = "0.1.0";
-                options.EnableStatefulHttpTransport = false;
+                options.EnableStatefulHttpTransport = true;
                 options.AllowInsecureDevelopmentCookies = ShouldAllowInsecureDevelopmentCookies(builder);
                 options.EnableSignedHeaderCallerBinding = true;
                 options.Builder.AllowAllBoundCallers();
@@ -70,10 +70,16 @@ public static class SampleServerHosting
                         "sample://workspace/guide",
                         "sample://workspace/projects"
                     },
+                    sampling = new
+                    {
+                        capability = "tasks.summarizeWithSampling",
+                        tool = "tasks.readForSampling"
+                    },
                     sampleIds = new
                     {
                         openTask = workspace.GetCurrentOpenTaskId(),
                         completedTask = "task-3",
+                        samplingTask = "task-4",
                         projects = new[] { "project-alpha", "project-beta" }
                     }
                 }));
@@ -127,7 +133,7 @@ public static class SampleServerHosting
                     """
                     # Sample Workspace Guide
 
-                    This sample server demonstrates the programmatic MCP flow with a small in-memory task workspace.
+                    This sample server demonstrates the full programmatic MCP flow with a small in-memory task workspace.
 
                     Use the six programmatic tools for progressive discovery and execution:
                     - `capabilities.search`
@@ -140,6 +146,11 @@ public static class SampleServerHosting
                     Available MCP resources:
                     - `sample://workspace/guide`
                     - `sample://workspace/projects`
+
+                    Additional sample flows:
+                    - `tasks.summarizeWithSampling` shows capability-handler sampling through `GetSamplingClient(...)`.
+                    - `tasks.readForSampling` is a read-only sampling tool for live client sampling.
+                    - `programmatic.client.sample(...)` is available on the sample's stateful transport inside explicit read-only scopes.
                     """));
 
         catalog.AddResource(
@@ -191,6 +202,26 @@ public static class SampleServerHosting
                     return ValueTask.FromResult(workspace.GetTaskById(input));
                 }));
 
+        catalog.AddCapability<TaskByIdInput, TaskSamplingSummaryResult>(
+            "tasks.summarizeWithSampling",
+            capability => capability
+                .WithDescription("Uses live MCP sampling to ask the connected client for a short task summary.")
+                .UseWhen("You want a natural-language task summary from the connected client instead of the raw task record.")
+                .DoNotUseWhen("The execution is not in an explicit read-only scope or you only need structured task fields.")
+                .WithHandler(
+                    async (input, context) =>
+                    {
+                        var sample = await context.GetSamplingClient().CreateMessageAsync(
+                            new ProgrammaticSamplingRequest(
+                                "You are summarizing one sample task for an operator. Use the allowed tool before answering, then respond with one concise paragraph.",
+                                [new ProgrammaticSamplingMessage("user", $"Summarize task {input.TaskId}. Mention the project, current status, and the next useful action.")],
+                                EnableTools: true,
+                                AllowedToolNames: ["tasks.readForSampling"]),
+                            context.CancellationToken);
+
+                        return new TaskSamplingSummaryResult(input.TaskId, sample.Text);
+                    }));
+
         catalog.AddCapability<ExportReportInput, ExportedReportResult>(
             "tasks.exportReport",
             capability => capability
@@ -201,6 +232,16 @@ public static class SampleServerHosting
                 {
                     var workspace = context.Services.GetRequiredService<SampleWorkspace>();
                     return ValueTask.FromResult(workspace.ExportReport(input));
+                }));
+
+        catalog.AddSamplingTool<TaskByIdInput, TaskDetailsResult>(
+            "tasks.readForSampling",
+            tool => tool
+                .WithDescription("Reads one sample task so the connected client can ground a live sampling response.")
+                .WithHandler((input, context) =>
+                {
+                    var workspace = context.Services.GetRequiredService<SampleWorkspace>();
+                    return ValueTask.FromResult(workspace.GetTaskById(input));
                 }));
 
         catalog.AddMutation<CompleteTaskArgs, CompleteTaskPreview, CompleteTaskApplyResult>(

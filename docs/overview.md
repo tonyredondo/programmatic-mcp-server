@@ -138,7 +138,7 @@ The built-in cookie fallback is:
 
 For cookie-derived caller binding, same-origin checks apply to MCP tool requests that rely on that cookie.
 
-The sample server runs MCP over stateless HTTP, enables signed-header fallback, and also supports the built-in cookie fallback for localhost-style development clients.
+The sample server runs on the stateful ASP.NET MCP transport, demonstrates live sampling, and still supports the built-in signed-header and cookie caller-binding fallbacks for localhost-style development clients.
 
 ## Built-In Storage And Runtime Assumptions
 

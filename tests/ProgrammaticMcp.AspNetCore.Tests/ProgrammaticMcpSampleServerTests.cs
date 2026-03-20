@@ -5,6 +5,10 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Logging.Abstractions;
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+using ProgrammaticMcp.SampleServer;
 
 namespace ProgrammaticMcp.AspNetCore.Tests;
 
@@ -31,7 +35,10 @@ public sealed class ProgrammaticMcpSampleServerTests
                 "sample://workspace/projects"
             },
             root["resourceUris"]!.AsArray().Select(static item => item!.GetValue<string>()).ToArray());
+        Assert.Equal("tasks.summarizeWithSampling", root["sampling"]!["capability"]!.GetValue<string>());
+        Assert.Equal("tasks.readForSampling", root["sampling"]!["tool"]!.GetValue<string>());
         Assert.Equal("task-1", root["sampleIds"]!["openTask"]!.GetValue<string>());
+        Assert.Equal("task-4", root["sampleIds"]!["samplingTask"]!.GetValue<string>());
         Assert.Equal(System.Net.HttpStatusCode.OK, health.StatusCode);
     }
 
@@ -63,7 +70,8 @@ public sealed class ProgrammaticMcpSampleServerTests
                 "tasks.complete",
                 "tasks.exportReport",
                 "tasks.getById",
-                "tasks.list"
+                "tasks.list",
+                "tasks.summarizeWithSampling"
             },
             items);
 
@@ -269,11 +277,109 @@ public sealed class ProgrammaticMcpSampleServerTests
         Assert.Equal("sample://workspace/guide", guideContents["uri"]!.GetValue<string>());
         Assert.Equal("text/markdown", guideContents["mimeType"]!.GetValue<string>());
         Assert.Contains("Sample Workspace Guide", guideContents["text"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Contains("programmatic.client.sample(...)", guideContents["text"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Contains("tasks.summarizeWithSampling", guideContents["text"]!.GetValue<string>(), StringComparison.Ordinal);
 
         var projects = await rawClient.ReadResourceAsync("sample://workspace/projects");
         var projectContents = Assert.IsType<JsonObject>(Assert.Single(projects["contents"]!.AsArray()));
         Assert.Equal("application/json", projectContents["mimeType"]!.GetValue<string>());
         Assert.Contains("project-alpha", projectContents["text"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SampleServerSupportsStatefulJsSamplingAndCapabilityHandlerSampling()
+    {
+        await using var factory = CreateFactory();
+        await using var client = await CreateSessionClientAsync(
+            factory,
+            CreateSamplingClientOptions(
+                request =>
+                {
+                    if (request.Messages.Count == 1)
+                    {
+                        var userText = Assert.IsType<TextContentBlock>(Assert.Single(request.Messages[0].Content)).Text;
+                        var taskId = userText.Contains("task-4", StringComparison.Ordinal) ? "task-4" : "task-1";
+
+                        return ValueTask.FromResult(
+                            new CreateMessageResult
+                            {
+                                Role = Role.Assistant,
+                                Model = "sample-test-model",
+                                StopReason = "tool_use",
+                                Content =
+                                [
+                                    new ToolUseContentBlock
+                                    {
+                                        Id = $"tool-{taskId}",
+                                        Name = "tasks.readForSampling",
+                                        Input = JsonSerializer.SerializeToElement(new { taskId })
+                                    }
+                                ]
+                            });
+                    }
+
+                    var toolResult = Assert.IsType<ToolResultContentBlock>(Assert.Single(request.Messages[^1].Content));
+                    var resultText = Assert.IsType<TextContentBlock>(Assert.Single(toolResult.Content)).Text;
+                    var task = JsonSerializer.Deserialize<TaskDetailsResult>(resultText, JsonSerializerOptions.Web);
+                    Assert.NotNull(task);
+
+                    return ValueTask.FromResult(
+                        new CreateMessageResult
+                        {
+                            Role = Role.Assistant,
+                            Model = "sample-test-model",
+                            StopReason = "endTurn",
+                            Content =
+                            [
+                                new TextContentBlock
+                                {
+                                    Text = $"{task!.TaskId} in {task.ProjectName} is {task.Status}: {task.Title}."
+                                }
+                            ]
+                        });
+                }));
+
+        Assert.Contains("programmatic.client.sample(...)", client.ServerInstructions, StringComparison.Ordinal);
+
+        var jsSampling = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "sample-js-sampling",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.client.sample({
+                                   messages: [{ role: "user", text: "Summarize task task-1 for the sample flow." }],
+                                   enableTools: true,
+                                   allowedToolNames: ["tasks.readForSampling"]
+                               });
+                           }
+                           """
+            });
+
+        var jsResult = ExtractStringResult(jsSampling);
+        Assert.Contains("task-1", jsResult, StringComparison.Ordinal);
+        Assert.Contains("open", jsResult, StringComparison.Ordinal);
+
+        var handlerSampling = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "sample-handler-sampling",
+                ["visibleApiPaths"] = new[] { "tasks.summarizeWithSampling" },
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.summarizeWithSampling({ taskId: "task-4" });
+                           }
+                           """
+            });
+
+        var handlerPayload = ParseStructuredContent(handlerSampling);
+        var handlerResult = ExtractObjectResult(handlerPayload);
+        Assert.Equal("task-4", handlerResult["taskId"]!.GetValue<string>());
+        Assert.Contains("task-4", handlerResult["summary"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Contains("open", handlerResult["summary"]!.GetValue<string>(), StringComparison.Ordinal);
     }
 
     private static WebApplicationFactory<Program> CreateFactory()
@@ -282,10 +388,118 @@ public sealed class ProgrammaticMcpSampleServerTests
             .WithWebHostBuilder(builder => builder.UseEnvironment("Development"));
     }
 
+    private static async Task<McpClient> CreateSessionClientAsync(WebApplicationFactory<Program> factory, McpClientOptions? options = null)
+    {
+        var httpClient = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+        var transport = new HttpClientTransport(
+            new HttpClientTransportOptions
+            {
+                Endpoint = new Uri(httpClient.BaseAddress!, "/mcp"),
+                TransportMode = HttpTransportMode.StreamableHttp
+            },
+            httpClient,
+            NullLoggerFactory.Instance,
+            ownsHttpClient: true);
+
+        return await McpClient.CreateAsync(transport, options ?? new McpClientOptions());
+    }
+
+    private static McpClientOptions CreateSamplingClientOptions(
+        Func<CreateMessageRequestParams, ValueTask<CreateMessageResult>> handler,
+        bool supportsToolUse = true)
+    {
+        return new McpClientOptions
+        {
+            Capabilities = new ClientCapabilities
+            {
+                Sampling = new SamplingCapability
+                {
+                    Tools = supportsToolUse ? new SamplingToolsCapability() : null
+                }
+            },
+            Handlers = new McpClientHandlers
+            {
+                SamplingHandler = (request, _, _) => handler(request!)
+            }
+        };
+    }
+
+    private static JsonObject ParseStructuredContent(CallToolResult result)
+    {
+        if (result.StructuredContent is JsonElement element)
+        {
+            return JsonNode.Parse(element.GetRawText())!.AsObject();
+        }
+
+        var mirroredText = result.Content
+            .OfType<TextContentBlock>()
+            .Select(static block => block.Text)
+            .FirstOrDefault(static text => !string.IsNullOrWhiteSpace(text));
+        if (!string.IsNullOrWhiteSpace(mirroredText))
+        {
+            return JsonNode.Parse(mirroredText)!.AsObject();
+        }
+
+        throw new Xunit.Sdk.XunitException("Structured content was not available on the tool result.");
+    }
+
+    private static string ExtractStringResult(CallToolResult result)
+    {
+        var payload = ParseStructuredContent(result);
+        if (TryExtractString(payload["result"], out var resultText))
+        {
+            return resultText;
+        }
+
+        if (TryExtractString(payload["error"]?["code"], out var errorCode))
+        {
+            return errorCode;
+        }
+
+        throw new Xunit.Sdk.XunitException($"A string result was not available on the tool result. Payload: {payload.ToJsonString()}");
+    }
+
+    private static JsonObject ExtractObjectResult(JsonObject payload)
+    {
+        if (payload["result"] is JsonObject resultObject)
+        {
+            return resultObject;
+        }
+
+        if (payload["result"] is JsonValue resultValue
+            && resultValue.TryGetValue<string>(out var resultText)
+            && JsonNode.Parse(resultText) is JsonObject parsedResult)
+        {
+            return parsedResult;
+        }
+
+        if (payload["taskId"] is not null && payload["summary"] is not null)
+        {
+            return payload;
+        }
+
+        throw new Xunit.Sdk.XunitException($"An object result was not available on the tool result. Payload: {payload.ToJsonString()}");
+    }
+
+    private static bool TryExtractString(JsonNode? node, out string value)
+    {
+        switch (node)
+        {
+            case JsonValue jsonValue when jsonValue.TryGetValue<string>(out value!):
+                return true;
+            case JsonObject jsonObject when jsonObject["text"] is JsonValue textValue && textValue.TryGetValue<string>(out value!):
+                return true;
+            default:
+                value = string.Empty;
+                return false;
+        }
+    }
+
     private sealed class SampleRawMcpClient(HttpClient client)
     {
         private int _nextId = 1;
         private string _protocolVersion = "2024-11-05";
+        private string? _sessionId;
         private readonly string? _defaultOrigin = client.BaseAddress is not null
             ? new Uri(client.BaseAddress, "/").GetLeftPart(UriPartial.Authority)
             : null;
@@ -364,6 +578,10 @@ public sealed class ProgrammaticMcpSampleServerTests
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
             request.Headers.TryAddWithoutValidation("MCP-Protocol-Version", _protocolVersion);
+            if (!string.IsNullOrWhiteSpace(_sessionId))
+            {
+                request.Headers.TryAddWithoutValidation(ProgrammaticMcpServerOptions.McpSessionIdHeaderName, _sessionId);
+            }
             if (!string.IsNullOrWhiteSpace(_defaultOrigin))
             {
                 request.Headers.TryAddWithoutValidation("Origin", _defaultOrigin);
@@ -375,6 +593,11 @@ public sealed class ProgrammaticMcpSampleServerTests
             if (method == "initialize" && json["result"]?["protocolVersion"] is JsonValue protocolVersion)
             {
                 _protocolVersion = protocolVersion.GetValue<string>();
+            }
+
+            if (response.Headers.TryGetValues(ProgrammaticMcpServerOptions.McpSessionIdHeaderName, out var sessionValues))
+            {
+                _sessionId = sessionValues.LastOrDefault();
             }
 
             return json;

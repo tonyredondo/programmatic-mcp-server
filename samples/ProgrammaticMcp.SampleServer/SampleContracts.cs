@@ -25,6 +25,10 @@ public sealed record TaskDetailsResult(
     DateTimeOffset UpdatedAtUtc,
     DateTimeOffset? CompletedAtUtc);
 
+public sealed record TaskSamplingSummaryResult(
+    string TaskId,
+    string Summary);
+
 public sealed record ExportReportInput(string ProjectId);
 
 public sealed record ExportedReportResult(
