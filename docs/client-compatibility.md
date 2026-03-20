@@ -2,6 +2,8 @@
 
 This document records the compatibility state for the first implementation milestone of the v0 HTTP MCP integration.
 
+For the broader repository scope and transport model, see [overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md).
+
 ## Repository-Validated Clients
 
 The following client paths are validated by automated tests in this repository:
@@ -37,6 +39,7 @@ Validation coverage for the repository harness includes:
 - The built-in cookie fallback is intended for HTTP MCP clients that preserve cookies across reconnects.
 - The built-in signed-header fallback is intended for non-cookie HTTP clients that can be provisioned with a stable `X-Programmatic-Mcp-Caller-Binding` token out of band.
 - The repository test harness validates the normal sessioned C# MCP SDK client path and also validates cookie and signed-header reconnect flows through both the SDK harness and the stateless raw HTTP harness.
+- The repository-owned SDK cookie-fallback coverage reconnects with the preserved caller-binding cookie and a same-origin `Origin` header, because cookie-derived caller binding requires same-origin validation.
 - The signed-header bootstrap path is host-owned: the host generates a stable token through `IProgrammaticCallerBindingTokenService.CreateSignedHeaderToken(...)` and provisions it to the client out of band before the client reconnects with `X-Programmatic-Mcp-Caller-Binding`.
 - The built-in cookie fallback issues a route-scoped, `HttpOnly`, `SameSite=Lax`, `Secure` cookie by default and enforces same-origin checks on any MCP request that resolves caller binding from that cookie.
 - The sample server relaxes the cookie `Secure` flag only for localhost-style development requests.

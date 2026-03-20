@@ -2,6 +2,8 @@
 
 This document describes the current v0 code-mode client flow exposed by the repository.
 
+For the broader system model and supported scope, see [overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md).
+
 ## Sequence
 
 The normal HTTP MCP sequence is:
@@ -17,7 +19,7 @@ The normal HTTP MCP sequence is:
 
 ## Expected Client Behavior
 
-- Clients provide a collision-resistant `conversationId`.
+- Clients provide a collision-resistant `conversationId` that matches `^[A-Za-z0-9._:-]{1,128}$`.
 - Clients treat `capabilityVersion` as the contract fingerprint for discovery and generated declarations.
-- Clients keep the `approvalId` + `approvalNonce` pair from preview-producing execution results when they want to apply or cancel later.
+- Clients keep the `approvalId` + `approvalNonce` pair from preview-producing execution results when they want to apply or cancel later. `mutation.list` re-discloses approval ids, but it does not return approval nonces.
 - Clients should treat mutation previews as advisory and expect apply-time revalidation.

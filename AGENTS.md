@@ -15,10 +15,12 @@ In this repository, "programmatic MCP" means:
 
 ## Source Of Truth
 
-- `INITIAL_PLAN.md` remains the source of truth for v0 scope, contracts, defaults, and constraints.
-- The shipped code, tests, and public documentation should reflect the implemented behavior and stay aligned with that plan.
-- Do not invent behavior that is not supported by the plan and the implemented contracts.
-- If implementation work changes public behavior, update the code, tests, docs, and the plan together in the same change.
+- The implemented behavior of the repository is defined by the shipped code, the automated tests, and the maintained public documentation in `README.md` and `docs/`.
+- Treat the code and tests as authoritative for current behavior. Treat the public docs as the maintained explanation of that behavior.
+- Do not invent behavior that is not supported by the implemented contracts, tests, and public documentation.
+- If implementation work changes public behavior, update the code, tests, sample behavior, and public docs together in the same change.
+- Compatibility expectations are documented in `docs/client-compatibility.md`.
+- The client interaction model and security model are documented in `docs/client-flow.md` and `docs/security.md`.
 
 ## Working Rules
 
@@ -28,6 +30,9 @@ In this repository, "programmatic MCP" means:
 - Keep the exposed runtime surface narrow, explicit, and schema-driven.
 - Prefer structured diagnostics and explicit contracts over implicit behavior.
 - Keep docs, tests, and samples aligned with the implemented behavior when it changes.
+- Keep package docs under `docs/packages/` aligned with the shipped NuGet packages.
+- Use subagents by default for parallel review and documentation work when the work can be split cleanly.
+- Reuse or close idle agents when the thread starts to fill up.
 
 ## V0 Direction
 
@@ -35,6 +40,7 @@ In this repository, "programmatic MCP" means:
 - Initial MCP foundation: `modelcontextprotocol/csharp-sdk`
 - Initial execution runtime: `Jint`
 - First integration layer: ASP.NET Core over the C# MCP SDK
+- The sample server is the end-to-end reference implementation for the repository.
 
 ## V0 Non-Goals
 

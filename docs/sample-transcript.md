@@ -2,6 +2,8 @@
 
 This transcript shows the intended end-to-end loop against `samples/ProgrammaticMcp.SampleServer`.
 
+For the broader repository overview, see [overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md).
+
 The sample uses the in-memory task domain with these stable ids:
 
 - open task: `task-1`
@@ -16,7 +18,7 @@ Expected outcome:
 
 - the server advertises `/mcp/types`
 - the instructions mention caller binding requirements for mutation flows
-- the sample sets a caller-binding cookie on localhost development runs
+- the sample enables signed-header fallback and also sets a caller-binding cookie for localhost-style cookie-capable clients
 
 ## 2. Discover The Capability Surface
 
@@ -107,6 +109,8 @@ List:
 
 Call `mutation.list` and expect the same approval id to be present.
 
+Keep the `approvalNonce` from the preview response. `mutation.list` does not return it.
+
 Apply:
 
 ```json
@@ -156,5 +160,6 @@ Expected `mutation.apply` outcome:
 ## Health And Browser Tooling
 
 - health checks are available at `/mcp/health`
+- the sample uses stateless HTTP MCP transport and relies on caller binding instead of MCP session identity
 - browser-style CORS is off by default
 - the sample only enables localhost-oriented CORS when `SampleServer:Cors:EnableBrowserTooling = true`

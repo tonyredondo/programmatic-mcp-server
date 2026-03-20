@@ -2,6 +2,8 @@
 
 This document describes the current v0 security model.
 
+For the broader execution and transport model, see [overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md).
+
 ## Built-In Runtime Boundary
 
 The built-in Jint runtime is a constrained convenience sandbox for trusted or authenticated same-tenant workflows. It is not a hostile multi-tenant isolation boundary.
@@ -49,6 +51,7 @@ In the ASP.NET Core integration, caller binding can come from:
 ## HTTP Transport Notes
 
 - the built-in cookie fallback is route-scoped, `HttpOnly`, `SameSite=Lax`, and `Secure` by default
+- the built-in cookie and signed-header fallback tokens are protected, route-bound, and expiring; the default cookie lifetime is 30 days and the default signed-header token lifetime is 24 hours
 - the sample server only relaxes the cookie `Secure` flag for localhost-style development requests
 - same-origin checks are enforced on any MCP request that resolves caller binding from the built-in cookie
 - the built-in signed-header fallback is intended for clients that cannot preserve cookies but can hold a host-provisioned stable token

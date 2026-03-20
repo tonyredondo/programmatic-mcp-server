@@ -25,6 +25,8 @@ The harness in [RuntimeProofHarness.cs](/Users/tony.redondo/repos/github/tonyred
 
 The async runtime profile remains valid and does not need to fall back to a sync-only execution model.
 
+This proof harness remains in the repository as a narrow validation artifact. The production runtime path is implemented separately in `ProgrammaticMcp.Jint`.
+
 ## Verification Commands
 
 - `dotnet test tests/ProgrammaticMcp.Jint.Tests/ProgrammaticMcp.Jint.Tests.csproj --configuration Release`

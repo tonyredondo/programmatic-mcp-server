@@ -2,48 +2,51 @@
 
 `Programmatic MCP Server` is a .NET library for building MCP servers that are meant to be used through generated code, not only through direct tool calls.
 
-The idea is inspired by:
+The library is built around one idea: an agent should be able to discover a focused capability surface, generate code against that surface, run the code in a constrained runtime, and keep large intermediate results out of model context whenever possible.
 
-- [Cloudflare: Code Mode](https://blog.cloudflare.com/code-mode/)
-- [Anthropic: Code execution with MCP](https://www.anthropic.com/engineering/code-execution-with-mcp)
+## What The Repository Provides Today
 
-## What This Repo Is Trying To Build
+The current implementation provides:
 
-A programmatic MCP server gives an agent a workflow like this:
-
-1. Discover a focused set of capabilities instead of loading a large tool surface blindly.
-2. Generate code against a predictable API surface.
-3. Run that code in a constrained runtime.
-4. Spill large outputs into artifacts instead of stuffing them into model context.
-5. Use approval-based mutation flows for writes.
-
-In this model, MCP is still the integration protocol, but the main user experience is code-first rather than tool-call-first.
-
-## Current V0 Shape
-
-The current v0 direction is:
-
-- .NET library-first, not a product-specific server
-- C# as the implementation language
-- .NET 8 and .NET 10 targets
-- `modelcontextprotocol/csharp-sdk` as the MCP foundation
-- `Jint` as the initial execution runtime
-- ASP.NET Core as the first supported integration layer
-
-The plan is for customers to get the main pieces already wired together:
-
-- capability registration and discovery
+- capability registration and progressive discovery
 - generated JavaScript and TypeScript-facing API surface
-- constrained JavaScript execution
-- capability search
-- artifact storage and paged reads
-- preview/list/apply/cancel mutation approval flow
-- caller binding for HTTP clients
+- constrained JavaScript execution through `Jint`
+- artifact storage and paged artifact reads
+- preview, list, apply, and cancel mutation approval flows
+- caller binding for HTTP MCP clients
 - ASP.NET Core integration on top of the C# MCP SDK
+- a runnable sample server that exercises the end-to-end loop
+
+## Why It Exists
+
+Traditional MCP usage is tool-call-first: clients load tools, pick one, call it, and repeat. This repository supports a different model:
+
+1. discover a narrow set of capabilities
+2. generate code against a predictable API surface
+3. execute that code in a bounded runtime
+4. spill large outputs into artifacts
+5. require explicit approval-aware mutation flows for writes
+
+In this model, MCP is still the protocol, but the client experience is code-first.
+
+## How It Works
+
+At a high level, the implemented flow is:
+
+1. call `initialize`
+2. call `tools/list`
+3. use `capabilities.search` to discover relevant capabilities
+4. fetch the generated declarations from `/types` when the client wants stronger code generation support
+5. generate JavaScript against `globalThis.programmatic`
+6. execute that JavaScript through `code.execute`
+7. read large results through `artifact.read`
+8. preview and apply writes through `mutation.list`, `mutation.apply`, and `mutation.cancel`
+
+For a fuller explanation of the execution model, artifact flow, approval flow, transport model, and supported scope, see [docs/overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md).
 
 ## Package Layout
 
-The implementation plan is organized around three library packages and one sample:
+The repository currently ships three library packages and one sample server:
 
 - `ProgrammaticMcp`
   Core abstractions, capability metadata, schema generation, hashing, approvals, artifacts, and shared contracts.
@@ -52,11 +55,13 @@ The implementation plan is organized around three library packages and one sampl
 - `ProgrammaticMcp.AspNetCore`
   ASP.NET Core and C# MCP SDK integration, tool exposure, caller binding, HTTP-specific behavior, and `/types`.
 - `samples/ProgrammaticMcp.SampleServer`
-  A small reference server used to prove the library design end to end.
+  A reference host used to prove the full loop end to end.
+
+Package-specific notes live under [docs/packages](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/packages/README.md).
 
 ## Minimal Host Example
 
-The smallest useful host wires the builder, opts into a mutation authorization policy, and maps the MCP route:
+The smallest useful host wires the builder, registers a read-only capability, and maps the MCP route:
 
 ```csharp
 using ProgrammaticMcp;
@@ -67,7 +72,6 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddProgrammaticMcpServer(options =>
 {
     options.Builder
-        .AllowAllBoundCallers()
         .AddCapability<WeatherInput, WeatherResult>(
             "weather.current",
             capability => capability
@@ -85,22 +89,14 @@ public sealed record WeatherInput(string City);
 public sealed record WeatherResult(string City, string Conditions);
 ```
 
-That gives the host:
+That host exposes:
 
 - `POST /mcp`
 - `GET /mcp/types`
 
-The generated discovery, TypeScript, execution, artifact, and mutation surfaces all come from that single registration source.
+The discovery surface, generated declarations, execution surface, artifact behavior, and mutation contracts all come from that single registration source.
 
-## Important V0 Constraints
-
-The current implementation is intentionally narrow:
-
-- the built-in Jint runtime is a constrained convenience sandbox, not a hostile multi-tenant isolation boundary
-- the first transport is HTTP/ASP.NET Core, not every MCP transport
-- the built-in reconnect and storage story is only guaranteed for single-process or sticky-session deployments
-- built-in artifact and approval stores are in-memory by default
-- authn/authz policy remains host-driven; the library requires explicit authorization decisions for mutation flows
+If the host later adds mutations, it must also make an explicit authorization-policy choice for those mutation flows.
 
 ## Running The Sample Server
 
@@ -127,14 +123,18 @@ The sample domain is intentionally small and in-memory. It exposes these exact c
 - `tasks.exportReport`
 - `tasks.complete`
 
+The sample runs MCP over stateless HTTP, enables signed-header caller binding, and also issues the built-in caller-binding cookie for localhost-style cookie-capable clients.
+
 ## Sample Flow
 
-The full transcript lives in [docs/sample-transcript.md](docs/sample-transcript.md). The short version is:
+The short version of the sample flow is:
 
-1. Discover capabilities with `capabilities.search`.
-2. Execute generated code with `code.execute`.
-3. Read spilled report output with `artifact.read`.
-4. Preview, list, and apply a mutation with `code.execute`, `mutation.list`, and `mutation.apply`.
+1. discover capabilities with `capabilities.search`
+2. execute generated code with `code.execute`
+3. read spilled report output with `artifact.read`
+4. preview, list, and apply a mutation with `code.execute`, `mutation.list`, and `mutation.apply`
+
+Clients must provide a `conversationId` that matches `^[A-Za-z0-9._:-]{1,128}$`.
 
 Example `code.execute` body:
 
@@ -155,34 +155,7 @@ Example report-spill execution:
 }
 ```
 
-Follow that with `artifact.read`:
-
-```json
-{
-  "conversationId": "sample-report",
-  "artifactId": "<resultArtifactId>",
-  "limit": 1
-}
-```
-
-Example mutation preview:
-
-```json
-{
-  "conversationId": "sample-complete",
-  "code": "async function main() { return await programmatic.tasks.complete({ taskId: 'task-1' }); }"
-}
-```
-
-List pending approvals for the conversation:
-
-```json
-{
-  "conversationId": "sample-complete"
-}
-```
-
-Apply the approved mutation:
+Example mutation apply request:
 
 ```json
 {
@@ -192,30 +165,44 @@ Apply the approved mutation:
 }
 ```
 
-The sample also includes a rejected mutation path: trying to complete `task-3` returns a preview, but `mutation.apply` fails with `validation_failed` because the task is already completed.
+The full end-to-end transcript lives in [docs/sample-transcript.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/sample-transcript.md).
 
-## Health And CORS
+## Supported Scope
 
-The sample maps health checks at `/mcp/health`.
+The current implementation supports:
 
-The library does not enable CORS automatically. The sample keeps browser-oriented CORS disabled by default and documents a safe localhost-only option through configuration:
+- .NET 8 and .NET 10 target frameworks for the library packages
+- `Jint` as the built-in JavaScript runtime
+- ASP.NET Core as the current supported transport adapter
+- in-memory built-in approval and artifact stores
+- HTTP caller binding through authenticated principal, MCP session identity, signed cookie fallback, or signed-header fallback
 
-```json
-{
-  "SampleServer": {
-    "Cors": {
-      "EnableBrowserTooling": true,
-      "AllowedOrigins": [
-        "http://127.0.0.1:3000",
-        "http://localhost:3000"
-      ]
-    }
-  }
-}
-```
+Compatibility details and validated client paths are documented in [docs/client-compatibility.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/client-compatibility.md).
 
-That policy is only meant for local browser tooling. It is not a production default.
+## Not Supported
 
-## Status
+The repository does not currently provide:
 
-The repository now includes the solution bootstrap, core contracts, the Jint runtime, the ASP.NET Core transport, packaging, and the sample reference server. The current behavior is defined by the shipped code, tests, and public documentation in this repository.
+- multi-language runtimes
+- distributed execution
+- strong hostile multi-tenant isolation inside the built-in runtime
+- product-specific business logic
+- automatic CORS policy configuration
+- a shared built-in approval or artifact store for multi-process deployments
+
+## Documentation Map
+
+- [docs/overview.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/overview.md)
+  System overview: what the library does, why it exists, how it works, and what is supported.
+- [docs/client-flow.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/client-flow.md)
+  The client-side interaction flow.
+- [docs/security.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/security.md)
+  Security model, caller binding, and host responsibilities.
+- [docs/client-compatibility.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/client-compatibility.md)
+  Validated client paths and reconnect expectations.
+- [docs/sample-transcript.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/sample-transcript.md)
+  The sample server’s end-to-end transcript.
+- [docs/packages/README.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/packages/README.md)
+  Package-specific reference notes.
+- [docs/spikes/jint-runtime-proof.md](/Users/tony.redondo/repos/github/tonyredondo/programmatic-mcp-server/docs/spikes/jint-runtime-proof.md)
+  Historical runtime proof notes for the Jint async model.
