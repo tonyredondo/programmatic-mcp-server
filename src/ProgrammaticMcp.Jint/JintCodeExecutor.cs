@@ -8,6 +8,7 @@ using Jint;
 using Jint.Constraints;
 using Jint.Native;
 using Jint.Runtime;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace ProgrammaticMcp.Jint;
 
@@ -103,6 +104,7 @@ public sealed class JintCodeExecutor : ICodeExecutor
         {
             engine.SetValue("__pmInvoke", new Func<string, object?, Task<HostCallResponse>>(bridge.InvokeAsync));
             engine.SetValue("__pmConsole", new Action<string, string>(bridge.CaptureConsole));
+            engine.SetValue("__pmSample", new Func<object?, Task<HostCallResponse>>(bridge.SampleAsync));
             await engine.ExecuteAsync(CreateBootstrapScript(_catalog.Capabilities, visibleCapabilities, _catalog.CapabilityVersion), cancellationToken: timeoutCts.Token);
             await engine.ExecuteAsync(request.Code, cancellationToken: timeoutCts.Token);
 
@@ -349,10 +351,13 @@ public sealed class JintCodeExecutor : ICodeExecutor
         builder.AppendLine("(() => {");
         builder.AppendLine("  const hostInvoke = globalThis.__pmInvoke;");
         builder.AppendLine("  const hostConsole = globalThis.__pmConsole;");
+        builder.AppendLine("  const hostSample = globalThis.__pmSample;");
         builder.AppendLine("  delete globalThis.__pmInvoke;");
         builder.AppendLine("  delete globalThis.__pmConsole;");
+        builder.AppendLine("  delete globalThis.__pmSample;");
         builder.AppendLine("  const root = globalThis.programmatic = globalThis.programmatic || {};");
         builder.AppendLine($"  root.__meta = {{ capabilityVersion: {JsonSerializer.Serialize(capabilityVersion)}, runtimeContractVersion: {JsonSerializer.Serialize(ProgrammaticContractConstants.GeneratedRuntimeContractVersion)} }};");
+        builder.AppendLine("  root.client = root.client || {};");
         builder.AppendLine($"  const hiddenChildren = {JsonSerializer.Serialize(hiddenChildrenByNamespace)};");
         builder.AppendLine("  const stableStringify = (value, seen = new Set()) => {");
         builder.AppendLine("    if (value === null) return 'null';");
@@ -417,6 +422,11 @@ public sealed class JintCodeExecutor : ICodeExecutor
             builder.AppendLine("  };");
         }
 
+        builder.AppendLine("  root.client.sample = async function(request = {}) {");
+        builder.AppendLine("    const response = await hostSample(request);");
+        builder.AppendLine("    if (!response.success) { throw response.error; }");
+        builder.AppendLine("    return response.value;");
+        builder.AppendLine("  };");
         builder.AppendLine("  const applyNamespaceProxies = (path, target) => {");
         builder.AppendLine("    for (const key of Object.keys(target)) {");
         builder.AppendLine("      const value = target[key];");
@@ -663,6 +673,10 @@ public sealed class JintCodeExecutor : ICodeExecutor
         private readonly ICapabilityCatalog _catalog;
         private readonly CodeExecutionRequest _request;
         private readonly IServiceProvider _services;
+        private readonly IServiceProvider _capabilityServices;
+        private readonly IServiceProvider _mutationServices;
+        private readonly IProgrammaticSamplingClient _executionSamplingClient;
+        private readonly IProgrammaticStructuredSamplingClient _executionStructuredSamplingClient;
         private readonly CancellationToken _requestCancellationToken;
         private int _apiCallCount;
         private int _consoleBytesEmitted;
@@ -691,6 +705,17 @@ public sealed class JintCodeExecutor : ICodeExecutor
             VisibleCapabilities = visibleCapabilities;
             _capabilitiesByPath = visibleCapabilities.ToDictionary(static capability => capability.ApiPath, StringComparer.Ordinal);
             _visiblePathSet = _capabilitiesByPath.Keys.ToHashSet(StringComparer.Ordinal);
+            (_executionSamplingClient, _executionStructuredSamplingClient) = CreateExecutionSamplingClients(
+                services,
+                request.VisibleApiPaths,
+                visibleCapabilities,
+                request.ConversationId,
+                callerBindingId);
+            _capabilityServices = SamplingServiceOverlay.Create(services, _executionSamplingClient, _executionStructuredSamplingClient);
+            var blockedMutationClient = FixedProgrammaticSamplingClient.Blocked(
+                "sampling_not_allowed_in_mutation_context",
+                "Sampling is not allowed while previewing or applying mutations.");
+            _mutationServices = SamplingServiceOverlay.Create(services, blockedMutationClient, blockedMutationClient);
             ArtifactWriter = new ExecutionArtifactWriter(
                 artifactStore,
                 request.ConversationId,
@@ -767,6 +792,72 @@ public sealed class JintCodeExecutor : ICodeExecutor
             }
         }
 
+        public async Task<HostCallResponse> SampleAsync(object? argument)
+        {
+            JsonNode? requestNode;
+            try
+            {
+                requestNode = ConvertBridgeArgument(argument);
+            }
+            catch (StructuredBridgeException exception)
+            {
+                _diagnostics.Add(new ExecutionDiagnostic(exception.Code, exception.Message, exception.Data));
+                return HostCallResponse.FromFailure(exception.ToJsError());
+            }
+
+            if (requestNode is not JsonObject requestObject)
+            {
+                var exception = new StructuredBridgeException("invalid_params", "Sampling request must be a JSON object.");
+                _diagnostics.Add(new ExecutionDiagnostic(exception.Code, exception.Message, exception.Data));
+                return HostCallResponse.FromFailure(exception.ToJsError());
+            }
+
+            ProgrammaticSamplingRequest request;
+            try
+            {
+                request = JsonSerializerContract.DeserializeFromNode<ProgrammaticSamplingRequest>(requestObject);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or JsonException or NotSupportedException)
+            {
+                var structured = new StructuredBridgeException("invalid_params", "Sampling request could not be deserialized.");
+                _diagnostics.Add(new ExecutionDiagnostic(structured.Code, structured.Message, structured.Data));
+                return HostCallResponse.FromFailure(structured.ToJsError());
+            }
+
+            try
+            {
+                var result = request.EnableTools
+                    ? await CreateToolEnabledSamplingResultAsync(request)
+                    : await _executionSamplingClient.CreateMessageAsync(request, ExecutionCancellationToken);
+                return HostCallResponse.FromSuccess(result.Text);
+            }
+            catch (ProgrammaticSamplingException exception)
+            {
+                _diagnostics.Add(new ExecutionDiagnostic(exception.Code, exception.Message, exception.Data));
+                return HostCallResponse.FromFailure(
+                    new JsonObject
+                    {
+                        ["code"] = exception.Code,
+                        ["message"] = exception.Message,
+                        ["capabilityPath"] = null,
+                        ["data"] = exception.Data?.DeepClone()
+                    });
+            }
+            catch (OperationCanceledException)
+            {
+                var cancelledByCaller = _requestCancellationToken.IsCancellationRequested;
+                var exception = new StructuredBridgeException(
+                    cancelledByCaller ? "execution_cancelled" : "timeout",
+                    cancelledByCaller ? "Execution was cancelled." : "Execution exceeded the configured timeout.",
+                    new JsonObject
+                    {
+                        ["reason"] = cancelledByCaller ? "cancelled" : "timeout"
+                    });
+                _diagnostics.Add(new ExecutionDiagnostic(exception.Code, exception.Message, exception.Data));
+                return HostCallResponse.FromFailure(exception.ToJsError());
+            }
+        }
+
         public void CaptureConsole(string level, string message)
         {
             ConsoleLinesEmitted++;
@@ -796,6 +887,64 @@ public sealed class JintCodeExecutor : ICodeExecutor
             // creates a race with the pending Release() in InvokeAsync().
         }
 
+        private static (IProgrammaticSamplingClient PublicClient, IProgrammaticStructuredSamplingClient StructuredClient) CreateExecutionSamplingClients(
+            IServiceProvider services,
+            IReadOnlyList<string>? visibleApiPaths,
+            IReadOnlyList<CapabilityDefinition> visibleCapabilities,
+            string conversationId,
+            string? callerBindingId)
+        {
+            if (visibleApiPaths is null)
+            {
+                var blocked = FixedProgrammaticSamplingClient.Blocked(
+                    "sampling_requires_explicit_read_only_scope",
+                    "Sampling requires an explicit VisibleApiPaths scope.");
+                return (blocked, blocked);
+            }
+
+            if (visibleCapabilities.Any(static capability => capability.IsMutation))
+            {
+                var blocked = FixedProgrammaticSamplingClient.Blocked(
+                    "sampling_not_allowed_with_visible_mutations",
+                    "Sampling is not allowed when visible capabilities include mutations.");
+                return (blocked, blocked);
+            }
+
+            var structuredClient = ProgrammaticSamplingServiceResolver.ResolveStructured(services);
+            if (structuredClient.IsSupported)
+            {
+                if (structuredClient is IProgrammaticSamplingClient dualInterfaceClient)
+                {
+                    return (dualInterfaceClient, structuredClient);
+                }
+
+                return (
+                    new StructuredBackedProgrammaticSamplingClient(structuredClient, services, conversationId, callerBindingId),
+                    structuredClient);
+            }
+
+            var publicClient = ProgrammaticSamplingServiceResolver.ResolvePublic(services);
+            if (publicClient.IsSupported)
+            {
+                var adaptedStructuredClient = new PublicBackedStructuredSamplingClient(publicClient);
+                return (
+                    new StructuredBackedProgrammaticSamplingClient(adaptedStructuredClient, services, conversationId, callerBindingId),
+                    adaptedStructuredClient);
+            }
+
+            var unsupported = FixedProgrammaticSamplingClient.Unsupported("Sampling is unavailable in this execution context.");
+            return (unsupported, unsupported);
+        }
+
+        private ValueTask<ProgrammaticSamplingResult> CreateToolEnabledSamplingResultAsync(ProgrammaticSamplingRequest request)
+            => StructuredSamplingOrchestrator.CreateMessageAsync(
+                request,
+                _executionStructuredSamplingClient,
+                _services,
+                _request.ConversationId,
+                CallerBindingId,
+                ExecutionCancellationToken);
+
         private async Task<HostCallResponse> InvokeCapabilityAsync(CapabilityDefinition capability, JsonObject input)
         {
             try
@@ -816,7 +965,7 @@ public sealed class JintCodeExecutor : ICodeExecutor
                 var context = new ProgrammaticCapabilityContext(
                     _request.ConversationId,
                     CallerBindingId,
-                    _services,
+                    _capabilityServices,
                     ExecutionCancellationToken,
                     ArtifactWriter);
                 var result = await capability.CapabilityHandler!(input, context);
@@ -919,7 +1068,7 @@ public sealed class JintCodeExecutor : ICodeExecutor
                     _request.ConversationId,
                     CallerBindingId,
                     ApprovalId: null,
-                    _services,
+                    _mutationServices,
                     ExecutionCancellationToken,
                     ArtifactWriter);
                 var preview = await capability.MutationPreviewHandler!(input, context);
@@ -1419,6 +1568,337 @@ public sealed class JintCodeExecutor : ICodeExecutor
         public string Reason { get; }
 
         public string BlockedOperation { get; }
+    }
+
+    private sealed class FixedProgrammaticSamplingClient(
+        string code,
+        string message,
+        bool isSupported,
+        bool supportsToolUse) : IProgrammaticSamplingClient, IProgrammaticStructuredSamplingClient
+    {
+        public static FixedProgrammaticSamplingClient Blocked(string code, string message)
+            => new(code, message, isSupported: true, supportsToolUse: false);
+
+        public static FixedProgrammaticSamplingClient Unsupported(string message)
+            => new("sampling_unavailable", message, isSupported: false, supportsToolUse: false);
+
+        public bool IsSupported => isSupported;
+
+        public bool SupportsToolUse => supportsToolUse;
+
+        public ValueTask<ProgrammaticSamplingResult> CreateMessageAsync(ProgrammaticSamplingRequest request, CancellationToken cancellationToken = default)
+            => ValueTask.FromException<ProgrammaticSamplingResult>(new ProgrammaticSamplingException(code, message));
+
+        public ValueTask<ProgrammaticStructuredSamplingResult> CreateMessageAsync(
+            ProgrammaticStructuredSamplingRequest request,
+            CancellationToken cancellationToken = default)
+            => ValueTask.FromException<ProgrammaticStructuredSamplingResult>(new ProgrammaticSamplingException(code, message));
+    }
+
+    private static class StructuredSamplingOrchestrator
+    {
+        public static async ValueTask<ProgrammaticSamplingResult> CreateMessageAsync(
+            ProgrammaticSamplingRequest request,
+            IProgrammaticStructuredSamplingClient structuredClient,
+            IServiceProvider services,
+            string conversationId,
+            string? callerBindingId,
+            CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                BuilderValidation.ValidateSamplingRequest(request);
+            }
+            catch (ArgumentException exception)
+            {
+                throw new ProgrammaticSamplingException("invalid_params", exception.Message, innerException: exception);
+            }
+
+            EnsureSupported(structuredClient);
+
+            if (!request.EnableTools)
+            {
+                var response = await structuredClient.CreateMessageAsync(ToStructuredRequest(request), cancellationToken);
+                return CreateFinalResult(response);
+            }
+
+            if (!structuredClient.SupportsToolUse)
+            {
+                throw new ProgrammaticSamplingException("sampling_tool_use_unavailable", "The current execution context does not support tool-enabled sampling.");
+            }
+
+            var limits = ProgrammaticSamplingLoopLimitResolver.Resolve(services);
+            var samplingTools = ResolveEffectiveTools(request, services);
+            var transcript = request.Messages
+                .Select(static message => new ProgrammaticStructuredSamplingMessage(
+                    message.Role,
+                    [new ProgrammaticStructuredSamplingTextBlock(message.Text)]))
+                .ToList();
+
+            for (var round = 0; round < limits.MaxSamplingRounds; round++)
+            {
+                var response = await structuredClient.CreateMessageAsync(
+                    new ProgrammaticStructuredSamplingRequest(
+                        request.SystemPrompt,
+                        transcript.ToArray(),
+                        request.MaxTokens ?? 1000,
+                        samplingTools,
+                        new ProgrammaticStructuredSamplingToolChoice("auto")),
+                    cancellationToken);
+
+                var toolUses = response.Content.OfType<ProgrammaticStructuredSamplingToolUseBlock>().ToArray();
+                if (toolUses.Length == 0)
+                {
+                    return CreateFinalResult(response);
+                }
+
+                transcript.Add(new ProgrammaticStructuredSamplingMessage(response.Role, response.Content));
+
+                foreach (var toolUse in toolUses)
+                {
+                    if (!samplingTools.Any(tool => string.Equals(tool.Name, toolUse.Name, StringComparison.Ordinal)))
+                    {
+                        throw new ProgrammaticSamplingException(
+                            "sampling_invalid_tool_call",
+                            $"The model requested unknown sampling tool '{toolUse.Name}'.");
+                    }
+
+                    if (toolUse.Input is not JsonObject inputObject)
+                    {
+                        throw new ProgrammaticSamplingException(
+                            "sampling_invalid_tool_call",
+                            $"Sampling tool '{toolUse.Name}' must be invoked with a JSON object.");
+                    }
+
+                    ProgrammaticSamplingToolExecutionResult executionResult;
+                    try
+                    {
+                        var blockedClient = FixedProgrammaticSamplingClient.Blocked(
+                            "sampling_reentry_not_allowed",
+                            "Sampling-tool handlers cannot start nested sampling requests.");
+                        var toolServices = SamplingServiceOverlay.Create(services, blockedClient, blockedClient);
+                        var samplingToolsRegistry = services.GetService(typeof(IProgrammaticSamplingToolRegistry)) as IProgrammaticSamplingToolRegistry
+                            ?? throw new ProgrammaticSamplingException("sampling_no_tools_available", "No sampling tools are available for this request.");
+                        executionResult = await samplingToolsRegistry.InvokeAsync(
+                            toolUse.Name,
+                            inputObject,
+                            new ProgrammaticSamplingToolContext(conversationId, callerBindingId, toolServices, cancellationToken),
+                            cancellationToken);
+                    }
+                    catch (ProgrammaticSamplingException)
+                    {
+                        throw;
+                    }
+                    catch (JsonSchemaValidationException exception)
+                    {
+                        throw new ProgrammaticSamplingException("sampling_invalid_tool_call", exception.Message, innerException: exception);
+                    }
+                    catch (Exception exception)
+                    {
+                        throw new ProgrammaticSamplingException("sampling_tool_execution_failed", exception.Message, innerException: exception);
+                    }
+
+                    if (Encoding.UTF8.GetByteCount(executionResult.Text) > limits.MaxSamplingToolResultBytes)
+                    {
+                        throw new ProgrammaticSamplingException("sampling_tool_result_too_large", "Sampling tool result exceeded the configured size limit.");
+                    }
+
+                    transcript.Add(
+                        new ProgrammaticStructuredSamplingMessage(
+                            "user",
+                            [
+                                new ProgrammaticStructuredSamplingToolResultBlock(
+                                    toolUse.Id,
+                                    executionResult.Text,
+                                    false,
+                                    executionResult.StructuredContent)
+                            ]));
+                }
+            }
+
+            throw new ProgrammaticSamplingException("sampling_round_limit_exceeded", "Sampling exceeded the configured round limit.");
+        }
+
+        private static ProgrammaticStructuredSamplingRequest ToStructuredRequest(ProgrammaticSamplingRequest request)
+            => new(
+                request.SystemPrompt,
+                request.Messages.Select(static message => new ProgrammaticStructuredSamplingMessage(
+                    message.Role,
+                    [new ProgrammaticStructuredSamplingTextBlock(message.Text)])).ToArray(),
+                request.MaxTokens ?? 1000);
+
+        private static ProgrammaticSamplingResult CreateFinalResult(ProgrammaticStructuredSamplingResult response)
+        {
+            var textBlocks = response.Content.OfType<ProgrammaticStructuredSamplingTextBlock>().Select(static block => block.Text).ToArray();
+            if (textBlocks.Length == 0)
+            {
+                throw new ProgrammaticSamplingException("sampling_failed", "Sampling completed without any text content.");
+            }
+
+            return new ProgrammaticSamplingResult(string.Join("\n\n", textBlocks), response.Model, response.StopReason);
+        }
+
+        private static IReadOnlyList<ProgrammaticStructuredSamplingToolDefinition> ResolveEffectiveTools(
+            ProgrammaticSamplingRequest request,
+            IServiceProvider services)
+        {
+            var registry = services.GetService(typeof(IProgrammaticSamplingToolRegistry)) as IProgrammaticSamplingToolRegistry;
+            if (registry is null)
+            {
+                throw new ProgrammaticSamplingException("sampling_no_tools_available", "No sampling tools are available for this request.");
+            }
+
+            var tools = request.AllowedToolNames is null
+                ? registry.Tools
+                : registry.Tools.Where(tool => request.AllowedToolNames.Contains(tool.Name, StringComparer.Ordinal)).ToArray();
+
+            if (tools.Count == 0)
+            {
+                throw new ProgrammaticSamplingException("sampling_no_tools_available", "No sampling tools are available for this request.");
+            }
+
+            return tools;
+        }
+
+        private static void EnsureSupported(IProgrammaticStructuredSamplingClient structuredClient)
+        {
+            if (!structuredClient.IsSupported)
+            {
+                throw new ProgrammaticSamplingException("sampling_unavailable", "Sampling is unavailable in this execution context.");
+            }
+        }
+    }
+
+    private sealed class StructuredBackedProgrammaticSamplingClient(
+        IProgrammaticStructuredSamplingClient structuredClient,
+        IServiceProvider services,
+        string conversationId,
+        string? callerBindingId) : IProgrammaticSamplingClient
+    {
+        public bool IsSupported => structuredClient.IsSupported;
+
+        public bool SupportsToolUse => structuredClient.SupportsToolUse;
+
+        public ValueTask<ProgrammaticSamplingResult> CreateMessageAsync(ProgrammaticSamplingRequest request, CancellationToken cancellationToken = default)
+            => StructuredSamplingOrchestrator.CreateMessageAsync(request, structuredClient, services, conversationId, callerBindingId, cancellationToken);
+    }
+
+    private sealed class PublicBackedStructuredSamplingClient(IProgrammaticSamplingClient publicClient) : IProgrammaticStructuredSamplingClient
+    {
+        public bool IsSupported => publicClient.IsSupported;
+
+        public bool SupportsToolUse => false;
+
+        public async ValueTask<ProgrammaticStructuredSamplingResult> CreateMessageAsync(
+            ProgrammaticStructuredSamplingRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            if (request.Tools is { Count: > 0 } || request.ToolChoice is not null)
+            {
+                throw new ProgrammaticSamplingException("sampling_tool_use_unavailable", "The current execution context does not support tool-enabled sampling.");
+            }
+
+            var messages = request.Messages.Select(ToPublicMessage).ToArray();
+            var response = await publicClient.CreateMessageAsync(
+                new ProgrammaticSamplingRequest(
+                    request.SystemPrompt,
+                    messages,
+                    EnableTools: false,
+                    AllowedToolNames: null,
+                    request.MaxTokens),
+                cancellationToken);
+
+            return new ProgrammaticStructuredSamplingResult(
+                "assistant",
+                [new ProgrammaticStructuredSamplingTextBlock(response.Text)],
+                response.Model,
+                response.StopReason);
+        }
+
+        private static ProgrammaticSamplingMessage ToPublicMessage(ProgrammaticStructuredSamplingMessage message)
+        {
+            var nonTextBlock = message.Content.FirstOrDefault(static block => block is not ProgrammaticStructuredSamplingTextBlock);
+            if (nonTextBlock is not null)
+            {
+                throw new ProgrammaticSamplingException(
+                    "sampling_tool_use_unavailable",
+                    "The current execution context cannot translate structured tool content through a text-only sampling client.");
+            }
+
+            var text = string.Join(
+                "\n\n",
+                message.Content
+                    .OfType<ProgrammaticStructuredSamplingTextBlock>()
+                    .Select(static block => block.Text));
+
+            return new ProgrammaticSamplingMessage(message.Role, text);
+        }
+    }
+
+    private static class SamplingServiceOverlay
+    {
+        public static IServiceProvider Create(
+            IServiceProvider inner,
+            IProgrammaticSamplingClient publicClient,
+            IProgrammaticStructuredSamplingClient structuredClient)
+        {
+            ArgumentNullException.ThrowIfNull(inner);
+            ArgumentNullException.ThrowIfNull(publicClient);
+            ArgumentNullException.ThrowIfNull(structuredClient);
+
+            return new OverlayServiceProvider(inner, publicClient, structuredClient);
+        }
+
+        private sealed class OverlayServiceProvider(
+            IServiceProvider inner,
+            IProgrammaticSamplingClient publicClient,
+            IProgrammaticStructuredSamplingClient structuredClient) : IServiceProvider
+        {
+            private readonly Lazy<IReadOnlyDictionary<Type, object>> _overrides = new(
+                () => new Dictionary<Type, object>
+                {
+                    [typeof(IProgrammaticSamplingClient)] = publicClient,
+                    [typeof(IProgrammaticStructuredSamplingClient)] = structuredClient,
+                    [typeof(IServiceScopeFactory)] = new OverlayServiceScopeFactory(inner, publicClient, structuredClient)
+                });
+
+            public object? GetService(Type serviceType)
+            {
+                if (serviceType == typeof(IServiceProvider))
+                {
+                    return this;
+                }
+
+                if (_overrides.Value.TryGetValue(serviceType, out var overrideValue))
+                {
+                    return overrideValue;
+                }
+
+                return inner.GetService(serviceType);
+            }
+        }
+
+        private sealed class OverlayServiceScopeFactory(
+            IServiceProvider inner,
+            IProgrammaticSamplingClient publicClient,
+            IProgrammaticStructuredSamplingClient structuredClient) : IServiceScopeFactory
+        {
+            public IServiceScope CreateScope()
+            {
+                var innerFactory = inner.GetRequiredService<IServiceScopeFactory>();
+                return new OverlayServiceScope(innerFactory.CreateScope(), publicClient, structuredClient);
+            }
+        }
+
+        private sealed class OverlayServiceScope(
+            IServiceScope inner,
+            IProgrammaticSamplingClient publicClient,
+            IProgrammaticStructuredSamplingClient structuredClient) : IServiceScope
+        {
+            public IServiceProvider ServiceProvider { get; } = Create(inner.ServiceProvider, publicClient, structuredClient);
+
+            public void Dispose() => inner.Dispose();
+        }
     }
 
     private sealed class EmptyServiceProvider : IServiceProvider

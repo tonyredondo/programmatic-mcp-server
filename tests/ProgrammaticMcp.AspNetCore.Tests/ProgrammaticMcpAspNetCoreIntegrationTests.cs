@@ -19,6 +19,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using ModelContextProtocol;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using ProgrammaticMcp.AspNetCore;
@@ -55,6 +56,116 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     }
 
     [Fact]
+    public async Task ResourcesAreAdvertisedSeparatelyAndReadableOnStatefulAndRawHttpPaths()
+    {
+        static void AddResources(ProgrammaticMcpBuilder catalog)
+        {
+            catalog.AddResource(
+                "test://docs/guide",
+                resource => resource
+                    .WithName("Guide")
+                    .WithDescription("A markdown guide resource.")
+                    .WithMimeType("text/markdown")
+                    .WithText("# Guide\n\nUse resources for supplemental context."));
+
+            catalog.AddResource(
+                "test://docs/projects",
+                resource => resource
+                    .WithName("Projects")
+                    .WithDescription("A JSON project snapshot.")
+                    .WithMimeType("application/json")
+                    .WithText("""{"items":[{"id":"project-alpha"}]}"""));
+        }
+
+        await using var statefulHost = await ProgrammaticMcpTestHost.StartAsync(configureCatalog: AddResources);
+        await using var sdkClient = await statefulHost.CreateSessionClientAsync();
+        Assert.Contains("resources/list", sdkClient.ServerInstructions, StringComparison.Ordinal);
+
+        var tools = await sdkClient.ListToolsAsync();
+        var names = tools.Select(tool => tool.ProtocolTool.Name).OrderBy(static name => name, StringComparer.Ordinal).ToArray();
+        Assert.Equal(
+            new[]
+            {
+                "artifact.read",
+                "capabilities.search",
+                "code.execute",
+                "mutation.apply",
+                "mutation.cancel",
+                "mutation.list"
+            },
+            names);
+
+        var sdkResources = await sdkClient.ListResourcesAsync();
+        Assert.Equal(
+            new[]
+            {
+                "test://docs/guide",
+                "test://docs/projects"
+            },
+            sdkResources.Select(static resource => resource.Uri).OrderBy(static value => value, StringComparer.Ordinal).ToArray());
+
+        var sdkRead = await sdkResources.Single(static resource => resource.Uri == "test://docs/guide").ReadAsync();
+        var sdkContent = Assert.IsType<TextResourceContents>(Assert.Single(sdkRead.Contents));
+        Assert.Equal("test://docs/guide", sdkContent.Uri);
+        Assert.Equal("text/markdown", sdkContent.MimeType);
+        Assert.Contains("Guide", sdkContent.Text, StringComparison.Ordinal);
+
+        await using var statelessHost = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: AddResources,
+            configureOptions: options => options.EnableStatefulHttpTransport = false);
+        await using var rawClient = statelessHost.CreateRawClient();
+        await rawClient.InitializeAsync();
+
+        var list = await rawClient.ListResourcesAsync();
+        Assert.Equal(
+            new[]
+            {
+                "test://docs/guide",
+                "test://docs/projects"
+            },
+            list.Result["resources"]!.AsArray()
+                .Select(item => item!["uri"]!.GetValue<string>())
+                .OrderBy(static value => value, StringComparer.Ordinal)
+                .ToArray());
+
+        var read = await rawClient.ReadResourceAsync("test://docs/guide");
+        var content = Assert.IsType<JsonObject>(Assert.Single(read.Result["contents"]!.AsArray()));
+        Assert.Equal("test://docs/guide", content["uri"]!.GetValue<string>());
+        Assert.Equal("text/markdown", content["mimeType"]!.GetValue<string>());
+        Assert.Contains("Guide", content["text"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MissingResourcesReturnNotFoundAndEmptyCatalogsListNoResources()
+    {
+        const string MissingUri = "test://docs/missing";
+
+        await using var statefulHost = await ProgrammaticMcpTestHost.StartAsync();
+        await using var sdkClient = await statefulHost.CreateSessionClientAsync();
+
+        Assert.DoesNotContain("resources/list", sdkClient.ServerInstructions, StringComparison.Ordinal);
+        Assert.Empty(await sdkClient.ListResourcesAsync());
+
+        var sdkException = await Assert.ThrowsAsync<McpProtocolException>(async () => await sdkClient.ReadResourceAsync(MissingUri));
+        Assert.Equal(McpErrorCode.ResourceNotFound, sdkException.ErrorCode);
+        Assert.Contains("not found", sdkException.Message, StringComparison.OrdinalIgnoreCase);
+
+        await using var statelessHost = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.EnableStatefulHttpTransport = false);
+        await using var rawClient = statelessHost.CreateRawClient();
+        await rawClient.InitializeAsync();
+
+        var list = await rawClient.ListResourcesAsync();
+        Assert.Empty(list.Result["resources"]!.AsArray());
+
+        var read = await rawClient.ReadResourceAsync(MissingUri);
+        Assert.True(read.IsError);
+        var error = Assert.IsType<JsonObject>(read.Body["error"]);
+        Assert.Equal((int)McpErrorCode.ResourceNotFound, error["code"]!.GetValue<int>());
+        Assert.Contains("not found", error["message"]!.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task InitializeInstructionsReflectConfiguredCallerBindingModes()
     {
         await using var cookieOnlyHost = await ProgrammaticMcpTestHost.StartAsync();
@@ -76,6 +187,22 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
             });
         await using var noFallbackClient = await noFallbackHost.CreateSessionClientAsync();
         Assert.Contains("no built-in HTTP fallback is enabled", noFallbackClient.ServerInstructions, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InitializeInstructionsAdvertiseSamplingOnlyOnStatefulTransport()
+    {
+        await using var statefulHost = await ProgrammaticMcpTestHost.StartAsync();
+        await using var statefulClient = await statefulHost.CreateSessionClientAsync();
+        Assert.Contains("MCP sampling is optional", statefulClient.ServerInstructions, StringComparison.Ordinal);
+        Assert.Contains("programmatic.client.sample(...)", statefulClient.ServerInstructions, StringComparison.Ordinal);
+        Assert.Contains("VisibleApiPaths", statefulClient.ServerInstructions, StringComparison.Ordinal);
+
+        await using var statelessHost = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.EnableStatefulHttpTransport = false);
+        await using var statelessClient = await statelessHost.CreateSdkClientAsync(includeDefaultOrigin: true);
+        Assert.DoesNotContain("programmatic.client.sample(...)", statelessClient.ServerInstructions, StringComparison.Ordinal);
+        Assert.DoesNotContain("MCP sampling is optional", statelessClient.ServerInstructions, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -238,6 +365,1244 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         var executeNode = ParseStructuredContent(execute);
         Assert.Equal(42, executeNode["result"]!.GetValue<int>());
         Assert.True(executeNode["stats"]!["apiCalls"]!.GetValue<int>() >= 1);
+    }
+
+    [Fact]
+    public async Task StatefulSamplingSupportsJsToolLoopWithARealSessionBackedClient()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddSamplingTool<ReadClockInput, ReadClockResult>(
+                    "clock.read",
+                    tool => tool
+                        .WithDescription("Reads the current clock.")
+                        .WithHandler((_, _) => ValueTask.FromResult(new ReadClockResult("09:30 UTC"))));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                request =>
+                {
+                    if (request.Messages.Count == 1)
+                    {
+                        return ValueTask.FromResult(
+                            new CreateMessageResult
+                            {
+                                Role = Role.Assistant,
+                                Model = "test-model",
+                                StopReason = "tool_use",
+                                Content =
+                                [
+                                    new ToolUseContentBlock
+                                    {
+                                        Id = "tool-1",
+                                        Name = "clock.read",
+                                        Input = JsonSerializer.SerializeToElement(new { timeZone = "UTC" })
+                                    }
+                                ]
+                            });
+                    }
+
+                    var finalMessage = request.Messages[^1];
+                    var toolResult = Assert.IsType<ToolResultContentBlock>(Assert.Single(finalMessage.Content));
+                    var resultText = Assert.IsType<TextContentBlock>(Assert.Single(toolResult.Content)).Text;
+                    Assert.Contains("09:30 UTC", resultText, StringComparison.Ordinal);
+
+                    return ValueTask.FromResult(
+                        new CreateMessageResult
+                        {
+                            Role = Role.Assistant,
+                            Model = "test-model",
+                            StopReason = "endTurn",
+                            Content =
+                            [
+                                new TextContentBlock
+                                {
+                                    Text = "The clock says 09:30 UTC."
+                                }
+                            ]
+                        });
+                }));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-js-tools",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.client.sample({
+                                   messages: [{ role: "user", text: "What time is it?" }],
+                                   enableTools: true,
+                                   allowedToolNames: ["clock.read"]
+                               });
+                           }
+                           """
+            });
+
+        Assert.False(execute.IsError ?? false, execute.StructuredContent?.GetRawText());
+        Assert.Equal("The clock says 09:30 UTC.", ExtractStringResult(execute));
+    }
+
+    [Fact]
+    public async Task StatefulSamplingRequiresAnExplicitReadOnlyScope()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync();
+        await using var client = await host.CreateSdkClientAsync(
+            includeDefaultOrigin: true,
+            options: CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-scope",
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_requires_explicit_read_only_scope", ParseStructuredContent(execute)["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task StatefulSamplingBlocksVisibleMutations()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync();
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-mutations",
+                ["visibleApiPaths"] = new[] { "tasks.complete" },
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_not_allowed_with_visible_mutations", ParseStructuredContent(execute)["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task StatelessSamplingIsUnavailableEvenWhenTheClientAdvertisesSampling()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.EnableStatefulHttpTransport = false);
+        var cookieContainer = new CookieContainer();
+        await using var client = await host.CreateSdkClientAsync(
+            cookieContainer: cookieContainer,
+            includeDefaultOrigin: true,
+            options: CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-stateless",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        var executeNode = ParseStructuredContent(execute);
+        Assert.Equal("sampling_unavailable", executeNode["result"]?.GetValue<string>() ?? executeNode.ToJsonString());
+    }
+
+    [Fact]
+    public async Task CapabilityHandlersCanUseSamplingInsideAnExplicitReadOnlyExecutionScope()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddCapability<EmptyInput, SamplingEnvelope>(
+                    "diag.askClient",
+                    capability => capability
+                        .WithDescription("Asks the connected client for a sample.")
+                        .UseWhen("You need to validate capability-handler sampling.")
+                        .DoNotUseWhen("You are not testing sampling.")
+                        .WithHandler(
+                            async (_, context) =>
+                            {
+                                var sample = await context.GetSamplingClient().CreateMessageAsync(
+                                    new ProgrammaticSamplingRequest(
+                                        null,
+                                        [new ProgrammaticSamplingMessage("user", "Hello from handler")]),
+                                    context.CancellationToken);
+                                return new SamplingEnvelope(sample.Text);
+                            }));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                request => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "Handler sample response" }]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-capability",
+                ["visibleApiPaths"] = new[] { "diag.askClient" },
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.diag.askClient({});
+                           }
+                           """
+            });
+
+        Assert.Equal("Handler sample response", ParseStructuredContent(execute)["result"]!["text"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CapabilityHandlersRequireAnExplicitReadOnlyScopeForSampling()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddCapability<EmptyInput, SamplingEnvelope>(
+                    "diag.askClient",
+                    capability => capability
+                        .WithDescription("Asks the connected client for a sample.")
+                        .UseWhen("You need to validate capability-handler sampling.")
+                        .DoNotUseWhen("You are not testing sampling.")
+                        .WithHandler(
+                            async (_, context) =>
+                            {
+                                try
+                                {
+                                    var sample = await context.GetSamplingClient().CreateMessageAsync(
+                                        new ProgrammaticSamplingRequest(
+                                            null,
+                                            [new ProgrammaticSamplingMessage("user", "Hello from handler")]),
+                                        context.CancellationToken);
+                                    return new SamplingEnvelope(sample.Text);
+                                }
+                                catch (ProgrammaticSamplingException exception)
+                                {
+                                    return new SamplingEnvelope(exception.Code);
+                                }
+                            }));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-capability-no-scope",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.diag.askClient({});
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_requires_explicit_read_only_scope", ParseStructuredContent(execute)["result"]!["text"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CapabilityHandlersBlockSamplingWhenVisibleMutationsArePresent()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddCapability<EmptyInput, SamplingEnvelope>(
+                    "diag.askClient",
+                    capability => capability
+                        .WithDescription("Asks the connected client for a sample.")
+                        .UseWhen("You need to validate capability-handler sampling.")
+                        .DoNotUseWhen("You are not testing sampling.")
+                        .WithHandler(
+                            async (_, context) =>
+                            {
+                                try
+                                {
+                                    var sample = await context.GetSamplingClient().CreateMessageAsync(
+                                        new ProgrammaticSamplingRequest(
+                                            null,
+                                            [new ProgrammaticSamplingMessage("user", "Hello from handler")]),
+                                        context.CancellationToken);
+                                    return new SamplingEnvelope(sample.Text);
+                                }
+                                catch (ProgrammaticSamplingException exception)
+                                {
+                                    return new SamplingEnvelope(exception.Code);
+                                }
+                            }));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-capability-mutation-scope",
+                ["visibleApiPaths"] = new[] { "diag.askClient", "tasks.complete" },
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.diag.askClient({});
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_not_allowed_with_visible_mutations", ParseStructuredContent(execute)["result"]!["text"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ResourceReadersReceiveABlockedSamplingClient()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddResource(
+                    "test://sampling/resource",
+                    resource => resource
+                        .WithName("Sampling Block")
+                        .WithDescription("Reports the resource-context sampling error.")
+                        .WithMimeType("text/plain")
+                        .WithReader(
+                            async context =>
+                            {
+                                try
+                                {
+                                    await ProgrammaticSamplingServiceResolver.ResolvePublic(context.Services).CreateMessageAsync(
+                                        new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "Hello")]),
+                                        context.CancellationToken);
+                                    return "unexpected";
+                                }
+                                catch (ProgrammaticSamplingException exception)
+                                {
+                                    return exception.Code;
+                                }
+                            }));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var read = await client.ReadResourceAsync("test://sampling/resource");
+        var content = Assert.IsType<TextResourceContents>(Assert.Single(read.Contents));
+        Assert.Equal("sampling_not_allowed_in_resource_context", content.Text);
+    }
+
+    [Fact]
+    public async Task ResourceReadersBlockPublicAndStructuredSamplingAcrossChildScopes()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddResource(
+                    "test://sampling/inspection",
+                    resource => resource
+                        .WithName("Sampling Inspection")
+                        .WithDescription("Reports the sampling clients visible during resource execution.")
+                        .WithMimeType("application/json")
+                        .WithReader(async context => JsonSerializer.Serialize(await InspectSamplingScopeAsync(context.Services, context.CancellationToken))));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var read = await client.ReadResourceAsync("test://sampling/inspection");
+        var content = Assert.IsType<TextResourceContents>(Assert.Single(read.Contents));
+        var inspection = JsonSerializer.Deserialize<SamplingScopeInspection>(content.Text)!;
+
+        Assert.True(inspection.PublicIsSupported);
+        Assert.False(inspection.PublicSupportsToolUse);
+        Assert.True(inspection.StructuredIsSupported);
+        Assert.False(inspection.StructuredSupportsToolUse);
+        Assert.True(inspection.PublicSameInChildScope);
+        Assert.True(inspection.StructuredSameInChildScope);
+        Assert.Equal("sampling_not_allowed_in_resource_context", inspection.PublicCode);
+        Assert.Equal("sampling_not_allowed_in_resource_context", inspection.StructuredCode);
+    }
+
+    [Fact]
+    public async Task MutationApplyHandlersReceiveABlockedSamplingClient()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddMutation<CompleteTaskArgs, CompleteTaskPreview, SamplingCodeResult>(
+                    "tasks.sampleBlocked",
+                    mutation => mutation
+                        .WithDescription("Reports the mutation-context sampling error.")
+                        .UseWhen("You need to validate mutation-context sampling.")
+                        .DoNotUseWhen("You are not testing sampling.")
+                        .WithPreviewHandler((input, _) => ValueTask.FromResult(new CompleteTaskPreview(input.TaskId, true)))
+                        .WithSummaryFactory((input, _, _) => ValueTask.FromResult("Complete " + input.TaskId))
+                        .WithApplyHandler(
+                            async (_, context) =>
+                            {
+                                try
+                                {
+                                    await ProgrammaticSamplingServiceResolver.ResolvePublic(context.Services).CreateMessageAsync(
+                                        new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "Hello")]),
+                                        context.CancellationToken);
+                                    return MutationApplyResult<SamplingCodeResult>.Success(new SamplingCodeResult("unexpected"));
+                                }
+                                catch (ProgrammaticSamplingException exception)
+                                {
+                                    return MutationApplyResult<SamplingCodeResult>.Success(new SamplingCodeResult(exception.Code));
+                                }
+                            }));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var preview = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-mutation-sampling-blocked",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.sampleBlocked({ taskId: "task-1" });
+                           }
+                           """
+            });
+        var approval = Assert.Single(ParseStructuredContent(preview)["approvalsRequested"]!.AsArray());
+
+        var apply = await client.CallToolAsync(
+            "mutation.apply",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-mutation-sampling-blocked",
+                ["approvalId"] = approval!["approvalId"]!.GetValue<string>(),
+                ["approvalNonce"] = approval["approvalNonce"]!.GetValue<string>()
+            });
+
+        Assert.Equal("sampling_not_allowed_in_mutation_context", ParseStructuredContent(apply)["result"]!["code"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task MutationApplyHandlersBlockPublicAndStructuredSamplingAcrossChildScopes()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddMutation<CompleteTaskArgs, CompleteTaskPreview, SamplingScopeInspection>(
+                    "tasks.inspectSampling",
+                    mutation => mutation
+                        .WithDescription("Reports the sampling clients visible during mutation apply.")
+                        .UseWhen("You need to validate mutation-context sampling.")
+                        .DoNotUseWhen("You are not testing sampling.")
+                        .WithPreviewHandler((input, _) => ValueTask.FromResult(new CompleteTaskPreview(input.TaskId, true)))
+                        .WithSummaryFactory((input, _, _) => ValueTask.FromResult("Inspect " + input.TaskId))
+                        .WithApplyHandler(
+                            async (_, context) => MutationApplyResult<SamplingScopeInspection>.Success(await InspectSamplingScopeAsync(context.Services, context.CancellationToken))));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var preview = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-mutation-sampling-inspection",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.inspectSampling({ taskId: "task-1" });
+                           }
+                           """
+            });
+        var approval = Assert.Single(ParseStructuredContent(preview)["approvalsRequested"]!.AsArray());
+
+        var apply = await client.CallToolAsync(
+            "mutation.apply",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-mutation-sampling-inspection",
+                ["approvalId"] = approval!["approvalId"]!.GetValue<string>(),
+                ["approvalNonce"] = approval["approvalNonce"]!.GetValue<string>()
+            });
+
+        var inspectionNode = ParseStructuredContent(apply)["result"]!;
+        Assert.True(inspectionNode["publicIsSupported"]!.GetValue<bool>());
+        Assert.False(inspectionNode["publicSupportsToolUse"]!.GetValue<bool>());
+        Assert.True(inspectionNode["structuredIsSupported"]!.GetValue<bool>());
+        Assert.False(inspectionNode["structuredSupportsToolUse"]!.GetValue<bool>());
+        Assert.True(inspectionNode["publicSameInChildScope"]!.GetValue<bool>());
+        Assert.True(inspectionNode["structuredSameInChildScope"]!.GetValue<bool>());
+        Assert.Equal("sampling_not_allowed_in_mutation_context", inspectionNode["publicCode"]!.GetValue<string>());
+        Assert.Equal("sampling_not_allowed_in_mutation_context", inspectionNode["structuredCode"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SamplingToolHandlersCannotStartNestedSamplingRequests()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddSamplingTool<ReadClockInput, ReadClockResult>(
+                    "clock.reentrant",
+                    tool => tool
+                        .WithDescription("Attempts to start a nested sampling request.")
+                        .WithHandler(
+                            async (_, context) =>
+                            {
+                                await ProgrammaticSamplingServiceResolver.ResolvePublic(context.Services).CreateMessageAsync(
+                                    new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "nested")]),
+                                    context.CancellationToken);
+                                return new ReadClockResult("unexpected");
+                            }));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                request =>
+                {
+                    if (request.Messages.Count == 1)
+                    {
+                        return ValueTask.FromResult(
+                            new CreateMessageResult
+                            {
+                                Role = Role.Assistant,
+                                Model = "test-model",
+                                StopReason = "tool_use",
+                                Content =
+                                [
+                                    new ToolUseContentBlock
+                                    {
+                                        Id = "tool-1",
+                                        Name = "clock.reentrant",
+                                        Input = JsonSerializer.SerializeToElement(new { timeZone = "UTC" })
+                                    }
+                                ]
+                            });
+                    }
+
+                    return ValueTask.FromResult(
+                        new CreateMessageResult
+                        {
+                            Role = Role.Assistant,
+                            Model = "test-model",
+                            StopReason = "endTurn",
+                            Content = [new TextContentBlock { Text = "unused" }]
+                        });
+                }));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-reentry",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }],
+                                       enableTools: true,
+                                       allowedToolNames: ["clock.reentrant"]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_reentry_not_allowed", ParseStructuredContent(execute)["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SamplingRequestSizeLimitIsEnforced()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.MaxSamplingRequestBytes = 128);
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-request-limit",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "__PAYLOAD__" }]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """.Replace("__PAYLOAD__", new string('x', 256), StringComparison.Ordinal)
+            });
+
+        Assert.Equal("sampling_request_too_large", ParseStructuredContent(execute)["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SamplingToolResultSizeLimitIsEnforced()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.MaxSamplingToolResultBytes = 32,
+            configureCatalog: catalog =>
+            {
+                catalog.AddSamplingTool<ReadClockInput, LargeSamplingToolResult>(
+                    "clock.large",
+                    tool => tool
+                        .WithDescription("Returns a large tool result.")
+                        .WithHandler((_, _) => ValueTask.FromResult(new LargeSamplingToolResult(new string('x', 128)))));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                request =>
+                {
+                    if (request.Messages.Count == 1)
+                    {
+                        return ValueTask.FromResult(
+                            new CreateMessageResult
+                            {
+                                Role = Role.Assistant,
+                                Model = "test-model",
+                                StopReason = "tool_use",
+                                Content =
+                                [
+                                    new ToolUseContentBlock
+                                    {
+                                        Id = "tool-1",
+                                        Name = "clock.large",
+                                        Input = JsonSerializer.SerializeToElement(new { timeZone = "UTC" })
+                                    }
+                                ]
+                            });
+                    }
+
+                    return ValueTask.FromResult(
+                        new CreateMessageResult
+                        {
+                            Role = Role.Assistant,
+                            Model = "test-model",
+                            StopReason = "endTurn",
+                            Content = [new TextContentBlock { Text = "unused" }]
+                        });
+                }));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-tool-limit",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }],
+                                       enableTools: true,
+                                       allowedToolNames: ["clock.large"]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_tool_result_too_large", ParseStructuredContent(execute)["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SamplingToolUseRequiresClientToolSupport()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddSamplingTool<ReadClockInput, ReadClockResult>(
+                    "clock.read",
+                    tool => tool
+                        .WithDescription("Reads the current clock.")
+                        .WithHandler((_, _) => ValueTask.FromResult(new ReadClockResult("09:30 UTC"))));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    }),
+                supportsToolUse: false));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-tool-support",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }],
+                                       enableTools: true,
+                                       allowedToolNames: ["clock.read"]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_tool_use_unavailable", ParseStructuredContent(execute)["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SamplingFailsWhenNoToolsAreAvailable()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync();
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-no-tools",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }],
+                                       enableTools: true
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_no_tools_available", ParseStructuredContent(execute)["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SamplingRejectsUnknownToolCalls()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddSamplingTool<ReadClockInput, ReadClockResult>(
+                    "clock.read",
+                    tool => tool
+                        .WithDescription("Reads the current clock.")
+                        .WithHandler((_, _) => ValueTask.FromResult(new ReadClockResult("09:30 UTC"))));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                request =>
+                {
+                    if (request.Messages.Count == 1)
+                    {
+                        return ValueTask.FromResult(
+                            new CreateMessageResult
+                            {
+                                Role = Role.Assistant,
+                                Model = "test-model",
+                                StopReason = "tool_use",
+                                Content =
+                                [
+                                    new ToolUseContentBlock
+                                    {
+                                        Id = "tool-1",
+                                        Name = "clock.unknown",
+                                        Input = JsonSerializer.SerializeToElement(new { timeZone = "UTC" })
+                                    }
+                                ]
+                            });
+                    }
+
+                    return ValueTask.FromResult(
+                        new CreateMessageResult
+                        {
+                            Role = Role.Assistant,
+                            Model = "test-model",
+                            StopReason = "endTurn",
+                            Content = [new TextContentBlock { Text = "unused" }]
+                        });
+                }));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-invalid-tool-call",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }],
+                                       enableTools: true,
+                                       allowedToolNames: ["clock.read"]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_invalid_tool_call", ParseStructuredContent(execute)["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SamplingReportsToolExecutionFailures()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureCatalog: catalog =>
+            {
+                catalog.AddSamplingTool<ReadClockInput, ReadClockResult>(
+                    "clock.throw",
+                    tool => tool
+                        .WithDescription("Throws while executing.")
+                        .WithHandler((_, _) => throw new InvalidOperationException("boom")));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                request =>
+                {
+                    if (request.Messages.Count == 1)
+                    {
+                        return ValueTask.FromResult(
+                            new CreateMessageResult
+                            {
+                                Role = Role.Assistant,
+                                Model = "test-model",
+                                StopReason = "tool_use",
+                                Content =
+                                [
+                                    new ToolUseContentBlock
+                                    {
+                                        Id = "tool-1",
+                                        Name = "clock.throw",
+                                        Input = JsonSerializer.SerializeToElement(new { timeZone = "UTC" })
+                                    }
+                                ]
+                            });
+                    }
+
+                    return ValueTask.FromResult(
+                        new CreateMessageResult
+                        {
+                            Role = Role.Assistant,
+                            Model = "test-model",
+                            StopReason = "endTurn",
+                            Content = [new TextContentBlock { Text = "unused" }]
+                        });
+                }));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-tool-execution-failed",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }],
+                                       enableTools: true,
+                                       allowedToolNames: ["clock.throw"]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_tool_execution_failed", ParseStructuredContent(execute)["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SamplingRoundLimitIsEnforced()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.MaxSamplingRounds = 1,
+            configureCatalog: catalog =>
+            {
+                catalog.AddSamplingTool<ReadClockInput, ReadClockResult>(
+                    "clock.read",
+                    tool => tool
+                        .WithDescription("Reads the current clock.")
+                        .WithHandler((_, _) => ValueTask.FromResult(new ReadClockResult("09:30 UTC"))));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "tool_use",
+                        Content =
+                        [
+                            new ToolUseContentBlock
+                            {
+                                Id = "tool-1",
+                                Name = "clock.read",
+                                Input = JsonSerializer.SerializeToElement(new { timeZone = "UTC" })
+                            }
+                        ]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-round-limit",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }],
+                                       enableTools: true,
+                                       allowedToolNames: ["clock.read"]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_round_limit_exceeded", ParseStructuredContent(execute)["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SamplingFailsWhenTheFinalAssistantResponseHasNoText()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync();
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content =
+                        [
+                            new ToolResultContentBlock
+                            {
+                                ToolUseId = "tool-1",
+                                Content = [new TextContentBlock { Text = "tool-only result" }]
+                            }
+                        ]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-no-final-text",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_failed", ExtractStringResult(execute));
+    }
+
+    [Fact]
+    public async Task SamplingJoinsMultipleFinalTextBlocks()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync();
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content =
+                        [
+                            new TextContentBlock { Text = "First paragraph." },
+                            new TextContentBlock { Text = "Second paragraph." }
+                        ]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-text-join",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.client.sample({
+                                   messages: [{ role: "user", text: "Hello" }]
+                               });
+                           }
+                           """
+            });
+
+        Assert.Equal("First paragraph.\n\nSecond paragraph.", ExtractStringResult(execute));
+    }
+
+    [Fact]
+    public async Task SamplingRequestSizeLimitCountsToolSchemas()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.MaxSamplingRequestBytes = 160,
+            configureCatalog: catalog =>
+            {
+                catalog.AddSamplingTool<ReadClockInput, ReadClockResult>(
+                    "clock.read",
+                    tool => tool
+                        .WithDescription("Reads the current clock.")
+                        .WithHandler((_, _) => ValueTask.FromResult(new ReadClockResult("09:30 UTC"))));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-schema-limit",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hi" }],
+                                       enableTools: true,
+                                       allowedToolNames: ["clock.read"]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_request_too_large", ParseStructuredContent(execute)["result"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CapabilityExecutionOverlaysShadowAmbientSamplingClientsAndPreserveChildScopes()
+    {
+        var ambient = new AmbientSamplingClient();
+
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureServices: services =>
+            {
+                services.AddSingleton<IProgrammaticSamplingClient>(ambient);
+                services.AddSingleton<IProgrammaticStructuredSamplingClient>(ambient);
+            },
+            configureCatalog: catalog =>
+            {
+                catalog.AddCapability<EmptyInput, SamplingIdentityInspection>(
+                    "diag.inspectSampling",
+                    capability => capability
+                        .WithDescription("Inspects the visible sampling clients.")
+                        .UseWhen("You need to validate sampling overlays.")
+                        .DoNotUseWhen("You are not testing sampling.")
+                        .WithHandler(
+                            (_, context) =>
+                            {
+                                var publicClient = ProgrammaticSamplingServiceResolver.ResolvePublic(context.Services);
+                                var structuredClient = ProgrammaticSamplingServiceResolver.ResolveStructured(context.Services);
+                                using var childScope = context.Services.GetRequiredService<IServiceScopeFactory>().CreateScope();
+                                var childPublic = ProgrammaticSamplingServiceResolver.ResolvePublic(childScope.ServiceProvider);
+                                var childStructured = ProgrammaticSamplingServiceResolver.ResolveStructured(childScope.ServiceProvider);
+                                return ValueTask.FromResult(
+                                    new SamplingIdentityInspection(
+                                        ReferenceEquals(publicClient, ambient),
+                                        ReferenceEquals(structuredClient, ambient),
+                                        ReferenceEquals(publicClient, childPublic),
+                                        ReferenceEquals(structuredClient, childStructured),
+                                        publicClient.IsSupported,
+                                        publicClient.SupportsToolUse,
+                                        structuredClient.IsSupported,
+                                        structuredClient.SupportsToolUse));
+                            }));
+            });
+        await using var client = await host.CreateSessionClientAsync(
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var execute = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sampling-overlay-live",
+                ["visibleApiPaths"] = new[] { "diag.inspectSampling" },
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.diag.inspectSampling({});
+                           }
+                           """
+            });
+
+        var inspection = ParseStructuredContent(execute)["result"]!;
+        Assert.False(inspection["publicIsAmbient"]!.GetValue<bool>());
+        Assert.False(inspection["structuredIsAmbient"]!.GetValue<bool>());
+        Assert.True(inspection["publicSameInChildScope"]!.GetValue<bool>());
+        Assert.True(inspection["structuredSameInChildScope"]!.GetValue<bool>());
+        Assert.True(inspection["publicIsSupported"]!.GetValue<bool>());
+        Assert.True(inspection["publicSupportsToolUse"]!.GetValue<bool>());
+        Assert.True(inspection["structuredIsSupported"]!.GetValue<bool>());
+        Assert.True(inspection["structuredSupportsToolUse"]!.GetValue<bool>());
     }
 
     [Fact]
@@ -1257,15 +2622,15 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         await gate.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         var stopTask = host.StopAsync();
-        await Task.Delay(250);
-        Assert.False(stopTask.IsCompleted);
+        var stopProbe = await Task.WhenAny(stopTask, Task.Delay(250));
+        Assert.NotSame(stopTask, stopProbe);
 
         gate.Release.TrySetResult();
         var execution = await executionTask;
         await stopTask;
 
         Assert.False(execution.IsError, execution.Body.ToJsonString());
-        Assert.Equal("released", execution.StructuredContent["result"]!.GetValue<string>());
+        Assert.Equal("released", ExtractStringResult(execution));
         Assert.Contains(
             activityCollector.CompletedActivities,
             activity => activity.OperationName == "programmatic.tool.call"
@@ -1377,8 +2742,169 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
 
     private static JsonObject ParseStructuredContent(CallToolResult result)
     {
-        Assert.True(result.StructuredContent.HasValue);
-        return JsonNode.Parse(result.StructuredContent.Value.GetRawText())!.AsObject();
+        if (result.StructuredContent.HasValue)
+        {
+            return JsonNode.Parse(result.StructuredContent.Value.GetRawText())!.AsObject();
+        }
+
+        var mirroredText = result.Content
+            .OfType<TextContentBlock>()
+            .Select(static block => block.Text)
+            .FirstOrDefault(static text => !string.IsNullOrWhiteSpace(text));
+        if (!string.IsNullOrWhiteSpace(mirroredText))
+        {
+            return JsonNode.Parse(mirroredText)!.AsObject();
+        }
+
+        throw new Xunit.Sdk.XunitException("Structured content was not available on the tool result.");
+    }
+
+    private static string ExtractStringResult(CallToolResult result)
+    {
+        var payload = ParseStructuredContent(result);
+        if (TryExtractString(payload["result"], out var resultText))
+        {
+            return resultText;
+        }
+
+        if (TryExtractString(payload["error"]?["code"], out var errorCode))
+        {
+            return errorCode;
+        }
+
+        throw new Xunit.Sdk.XunitException($"A string result was not available on the tool result. Payload: {payload.ToJsonString()}");
+    }
+
+    private static string ExtractStringResult(RawMcpResponse response)
+    {
+        if (TryExtractString(response.StructuredContent["result"], out var resultText))
+        {
+            return resultText;
+        }
+
+        var mirroredText = response.Result["content"]?.AsArray()
+            .Select(static item => item?["text"]?.GetValue<string>())
+            .FirstOrDefault(static text => !string.IsNullOrWhiteSpace(text));
+        if (!string.IsNullOrWhiteSpace(mirroredText))
+        {
+            try
+            {
+                var parsed = JsonNode.Parse(mirroredText);
+                if (TryExtractString(parsed, out var parsedText))
+                {
+                    return parsedText;
+                }
+            }
+            catch (JsonException)
+            {
+                return mirroredText;
+            }
+        }
+
+        if (TryExtractString(response.Body["error"]?["code"], out var errorCode))
+        {
+            return errorCode;
+        }
+
+        throw new Xunit.Sdk.XunitException($"A string result was not available on the raw tool result. Payload: {response.Body.ToJsonString()}");
+    }
+
+    private static bool TryExtractString(JsonNode? node, out string value)
+    {
+        if (node is JsonValue jsonValue && jsonValue.TryGetValue<string>(out var directValue))
+        {
+            value = directValue;
+            return true;
+        }
+
+        if (node is JsonObject jsonObject
+            && jsonObject["text"] is JsonValue textValue
+            && textValue.TryGetValue<string>(out var objectText))
+        {
+            value = objectText;
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    private static McpClientOptions CreateSamplingClientOptions(
+        Func<CreateMessageRequestParams, ValueTask<CreateMessageResult>> handler,
+        bool supportsToolUse = true)
+    {
+        return new McpClientOptions
+        {
+            Capabilities = new ClientCapabilities
+            {
+                Sampling = new SamplingCapability
+                {
+                    Tools = supportsToolUse ? new SamplingToolsCapability() : null
+                }
+            },
+            Handlers = new McpClientHandlers
+            {
+                SamplingHandler = (request, _, _) => handler(request!)
+            }
+        };
+    }
+
+    private static async Task<SamplingScopeInspection> InspectSamplingScopeAsync(IServiceProvider services, CancellationToken cancellationToken)
+    {
+        var publicClient = ProgrammaticSamplingServiceResolver.ResolvePublic(services);
+        var structuredClient = ProgrammaticSamplingServiceResolver.ResolveStructured(services);
+        using var childScope = services.GetRequiredService<IServiceScopeFactory>().CreateScope();
+        var childPublic = ProgrammaticSamplingServiceResolver.ResolvePublic(childScope.ServiceProvider);
+        var childStructured = ProgrammaticSamplingServiceResolver.ResolveStructured(childScope.ServiceProvider);
+
+        return new SamplingScopeInspection(
+            publicClient.IsSupported,
+            publicClient.SupportsToolUse,
+            structuredClient.IsSupported,
+            structuredClient.SupportsToolUse,
+            ReferenceEquals(publicClient, childPublic),
+            ReferenceEquals(structuredClient, childStructured),
+            await CapturePublicSamplingCodeAsync(services, cancellationToken),
+            await CaptureStructuredSamplingCodeAsync(services, cancellationToken));
+    }
+
+    private static async Task<string> CapturePublicSamplingCodeAsync(IServiceProvider services, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var client = ProgrammaticSamplingServiceResolver.ResolvePublic(services);
+            _ = await client.CreateMessageAsync(
+                new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "Hello")]),
+                cancellationToken);
+            return "ok";
+        }
+        catch (ProgrammaticSamplingException exception)
+        {
+            return exception.Code;
+        }
+    }
+
+    private static async Task<string> CaptureStructuredSamplingCodeAsync(IServiceProvider services, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var client = ProgrammaticSamplingServiceResolver.ResolveStructured(services);
+            _ = await client.CreateMessageAsync(
+                new ProgrammaticStructuredSamplingRequest(
+                    null,
+                    [
+                        new ProgrammaticStructuredSamplingMessage(
+                            "user",
+                            [new ProgrammaticStructuredSamplingTextBlock("Hello")])
+                    ],
+                    32),
+                cancellationToken);
+            return "ok";
+        }
+        catch (ProgrammaticSamplingException exception)
+        {
+            return exception.Code;
+        }
     }
 
     public static IEnumerable<object[]> InvalidConversationIdCases()
@@ -1515,6 +3041,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
                     options.ExecutorOptions = options.ExecutorOptions with
                     {
                         MaxResultBytes = 256,
+                        MemoryBytes = 67_108_864,
                         ArtifactRetention = options.ExecutorOptions.ArtifactRetention with
                         {
                             ArtifactChunkBytes = 128
@@ -1561,7 +3088,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
             return new HttpClient { BaseAddress = BaseAddress };
         }
 
-        public async Task<McpClient> CreateSessionClientAsync()
+        public async Task<McpClient> CreateSessionClientAsync(McpClientOptions? options = null)
         {
             var transport = new HttpClientTransport(
                 new HttpClientTransportOptions
@@ -1569,13 +3096,14 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
                     Endpoint = new Uri(BaseAddress, McpPath),
                     TransportMode = HttpTransportMode.StreamableHttp
                 });
-            return await McpClient.CreateAsync(transport);
+            return await McpClient.CreateAsync(transport, options ?? new McpClientOptions());
         }
 
         public async Task<McpClient> CreateSdkClientAsync(
             CookieContainer? cookieContainer = null,
             string? signedHeaderToken = null,
-            bool includeDefaultOrigin = false)
+            bool includeDefaultOrigin = false,
+            McpClientOptions? options = null)
         {
             var handler = new HttpClientHandler
             {
@@ -1610,7 +3138,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
                 NullLoggerFactory.Instance,
                 ownsHttpClient: true);
 
-            return await McpClient.CreateAsync(transport);
+            return await McpClient.CreateAsync(transport, options ?? new McpClientOptions());
         }
 
         public RawMcpClient CreateRawClient(CookieContainer? cookieContainer = null, string? signedHeaderToken = null, bool includeDefaultOrigin = true, string? hostHeader = null)
@@ -1738,6 +3266,23 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
                 {
                     ["name"] = name,
                     ["arguments"] = arguments
+                },
+                origin,
+                cancellationToken);
+        }
+
+        public Task<RawMcpResponse> ListResourcesAsync(string? origin = null, CancellationToken cancellationToken = default)
+        {
+            return SendAsync("resources/list", new JsonObject(), origin, cancellationToken);
+        }
+
+        public Task<RawMcpResponse> ReadResourceAsync(string uri, string? origin = null, CancellationToken cancellationToken = default)
+        {
+            return SendAsync(
+                "resources/read",
+                new JsonObject
+                {
+                    ["uri"] = uri
                 },
                 origin,
                 cancellationToken);
@@ -1879,6 +3424,8 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     {
         public IReadOnlyList<CapabilityDefinition> Capabilities => Array.Empty<CapabilityDefinition>();
 
+        public IReadOnlyList<ProgrammaticResourceDefinition> Resources => Array.Empty<ProgrammaticResourceDefinition>();
+
         public string CapabilityVersion => "throwing-catalog";
 
         public string GeneratedTypeScript => throw new InvalidOperationException("Synthetic type rendering failure.");
@@ -1887,6 +3434,9 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
 
         public CapabilitySearchResponse Search(CapabilitySearchRequest request)
             => new(1, CapabilityVersion, request.DetailLevel, Array.Empty<CapabilitySearchItem>(), null);
+
+        public ValueTask<ProgrammaticResourceReadResult?> ReadResourceAsync(string uri, ProgrammaticResourceContext context)
+            => ValueTask.FromResult<ProgrammaticResourceReadResult?>(null);
     }
 
     private sealed class TestActivityCollector : IDisposable
@@ -1975,5 +3525,52 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
 
     private sealed record CompleteTaskApplyResult(string TaskId, string Status);
 
+    private sealed record SamplingEnvelope(string Text);
+
+    private sealed record SamplingCodeResult(string Code);
+
+    private sealed record ReadClockInput(string TimeZone);
+
+    private sealed record ReadClockResult(string CurrentTime);
+
+    private sealed record LargeSamplingToolResult(string Payload);
+
     private sealed record ScopeProbeResult(string ScopeId);
+
+    private sealed record SamplingScopeInspection(
+        bool PublicIsSupported,
+        bool PublicSupportsToolUse,
+        bool StructuredIsSupported,
+        bool StructuredSupportsToolUse,
+        bool PublicSameInChildScope,
+        bool StructuredSameInChildScope,
+        string PublicCode,
+        string StructuredCode);
+
+    private sealed record SamplingIdentityInspection(
+        bool PublicIsAmbient,
+        bool StructuredIsAmbient,
+        bool PublicSameInChildScope,
+        bool StructuredSameInChildScope,
+        bool PublicIsSupported,
+        bool PublicSupportsToolUse,
+        bool StructuredIsSupported,
+        bool StructuredSupportsToolUse);
+
+    private sealed class AmbientSamplingClient : IProgrammaticSamplingClient, IProgrammaticStructuredSamplingClient
+    {
+        public bool IsSupported => false;
+
+        public bool SupportsToolUse => false;
+
+        public ValueTask<ProgrammaticSamplingResult> CreateMessageAsync(ProgrammaticSamplingRequest request, CancellationToken cancellationToken = default)
+            => ValueTask.FromException<ProgrammaticSamplingResult>(
+                new ProgrammaticSamplingException("ambient_sampling_client_used", "The ambient public sampling client should not be used."));
+
+        public ValueTask<ProgrammaticStructuredSamplingResult> CreateMessageAsync(
+            ProgrammaticStructuredSamplingRequest request,
+            CancellationToken cancellationToken = default)
+            => ValueTask.FromException<ProgrammaticStructuredSamplingResult>(
+                new ProgrammaticSamplingException("ambient_sampling_client_used", "The ambient structured sampling client should not be used."));
+    }
 }

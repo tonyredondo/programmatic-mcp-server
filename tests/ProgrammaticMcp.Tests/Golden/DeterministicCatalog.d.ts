@@ -1,4 +1,6 @@
 declare namespace programmatic {
+  type ProgrammaticSamplingMessage = { role: "assistant" | "user"; text: string };
+  type ProgrammaticSamplingRequest = { messages: ProgrammaticSamplingMessage[]; systemPrompt?: string | null; enableTools?: boolean; allowedToolNames?: string[] | null; maxTokens?: number | null };
   type ProjectsListInput = { includeArchived: boolean };
   type ProjectsListResult = { projects: string[] };
   type TasksCompleteInput = { taskId: string };
@@ -12,5 +14,8 @@ declare namespace programmatic {
   namespace tasks { }
   namespace tasks {
     function complete(input: TasksCompleteInput): Promise<TasksCompleteResult>;
+  }
+  namespace client {
+    function sample(request: ProgrammaticSamplingRequest): Promise<string>;
   }
 }

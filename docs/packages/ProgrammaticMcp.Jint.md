@@ -6,7 +6,7 @@
 
 - `JintCodeExecutor`
 - `JintExecutorOptions`
-- the generated `programmatic.*` namespace bootstrap
+- the generated `programmatic.*` namespace bootstrap, including `programmatic.client.sample(...)`
 - runtime diagnostics, console capture, artifact spilling, and mutation preview creation
 
 ## When To Use It
@@ -17,6 +17,7 @@ Use this package when you want the built-in constrained JavaScript execution mod
 
 - one Jint engine is created per request
 - host capability calls are serialized inside a single execution
+- `programmatic.client.sample(...)` still requires an explicit read-only `VisibleApiPaths` scope; when that scope is present it uses a contextual sampling client if the host provides one, otherwise it returns `sampling_unavailable`
 - request-level limits can only narrow configured defaults; they never widen them
 - large results spill into artifacts when caller continuity is available
 

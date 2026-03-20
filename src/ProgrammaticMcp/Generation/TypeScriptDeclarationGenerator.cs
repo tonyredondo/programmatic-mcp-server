@@ -24,6 +24,8 @@ public static class TypeScriptDeclarationGenerator
         var builder = new StringBuilder();
 
         builder.AppendLine("declare namespace programmatic {");
+        builder.AppendLine("  type ProgrammaticSamplingMessage = { role: \"assistant\" | \"user\"; text: string };");
+        builder.AppendLine("  type ProgrammaticSamplingRequest = { messages: ProgrammaticSamplingMessage[]; systemPrompt?: string | null; enableTools?: boolean; allowedToolNames?: string[] | null; maxTokens?: number | null };");
 
         foreach (var capability in capabilities)
         {
@@ -70,6 +72,9 @@ public static class TypeScriptDeclarationGenerator
             builder.AppendLine("  }");
         }
 
+        builder.AppendLine("  namespace client {");
+        builder.AppendLine("    function sample(request: ProgrammaticSamplingRequest): Promise<string>;");
+        builder.AppendLine("  }");
         builder.AppendLine("}");
         return builder.ToString();
     }

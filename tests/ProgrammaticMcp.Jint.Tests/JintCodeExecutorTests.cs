@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.DependencyInjection;
 using ProgrammaticMcp.Jint;
 
 namespace ProgrammaticMcp.Jint.Tests;
@@ -112,6 +113,430 @@ public sealed class JintCodeExecutorTests
 
         Assert.Equal("""{"capabilityVersionType":"string","incrementType":"undefined","processType":"undefined","rawBridgeType":"undefined","requireType":"undefined"}""", CanonicalJson.Serialize(result.Result));
         Assert.Equal(new[] { "math.double" }, result.EffectiveVisibleApiPaths);
+    }
+
+    [Fact]
+    public async Task RuntimeAlwaysExposesClientSampleAndRuntimeContractVersion()
+    {
+        var fixture = CreateFixture();
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return {
+                        runtimeContractVersion: programmatic.__meta.runtimeContractVersion,
+                        sampleType: typeof programmatic.client.sample
+                    };
+                }
+                """,
+                VisibleApiPaths: new[] { "math.double" }));
+
+        Assert.Equal(
+            """{"runtimeContractVersion":"programmatic-runtime-v2","sampleType":"function"}""",
+            CanonicalJson.Serialize(result.Result));
+    }
+
+    [Fact]
+    public async Task ClientSampleIsUnavailableWithoutAContextualSamplingClient()
+    {
+        var fixture = CreateFixture();
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    try {
+                        return await programmatic.client.sample({
+                            messages: [{ role: "user", text: "Hello" }]
+                        });
+                    } catch (error) {
+                        return error.code;
+                    }
+                }
+                """,
+                VisibleApiPaths: Array.Empty<string>()));
+
+        Assert.Equal("sampling_unavailable", result.Result?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ClientSampleUsesAnInjectedSamplingClient()
+    {
+        var fixture = CreateFixture();
+        using var services = new SamplingServiceProvider(publicClient: new FakeSamplingClient());
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return await programmatic.client.sample({
+                        systemPrompt: "Be brief",
+                        messages: [{ role: "user", text: "Hello" }]
+                    });
+                }
+                """,
+                VisibleApiPaths: Array.Empty<string>(),
+                Services: services));
+
+        Assert.Equal("sampled:Hello", result.Result?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ClientSampleRejectsInvalidBridgeRequestsBeforeSamplingStarts()
+    {
+        var fixture = CreateFixture();
+        using var services = new SamplingServiceProvider(publicClient: new FakeSamplingClient());
+
+        var nonObjectRequest = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    try {
+                        return await programmatic.client.sample("hello");
+                    } catch (error) {
+                        return error.code;
+                    }
+                }
+                """,
+                VisibleApiPaths: Array.Empty<string>(),
+                Services: services));
+
+        Assert.Equal("invalid_params", nonObjectRequest.Result?.GetValue<string>());
+
+        var invalidRequest = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    try {
+                        return await programmatic.client.sample({ messages: [] });
+                    } catch (error) {
+                        return error.code;
+                    }
+                }
+                """,
+                VisibleApiPaths: Array.Empty<string>(),
+                Services: services));
+
+        Assert.Equal("invalid_params", invalidRequest.Result?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ClientSampleUsesTheStructuredPathForToolEnabledRequests()
+    {
+        var fixture = CreateFixture();
+        var publicClient = new ThrowingSamplingClient("public_client_used");
+        var structuredClient = new ScriptedStructuredSamplingClient(
+            new Func<ProgrammaticStructuredSamplingRequest, ProgrammaticStructuredSamplingResult>[]
+            {
+                _ => new ProgrammaticStructuredSamplingResult(
+                    "assistant",
+                    [new ProgrammaticStructuredSamplingToolUseBlock("tool-1", "lookup", new JsonObject { ["name"] = "world" })],
+                    "fake-model",
+                    "toolUse"),
+                request =>
+                {
+                    var toolResult = Assert.IsType<ProgrammaticStructuredSamplingToolResultBlock>(request.Messages.Last().Content.Single());
+                    Assert.Equal("tool-1", toolResult.ToolUseId);
+                    return new ProgrammaticStructuredSamplingResult(
+                        "assistant",
+                        [new ProgrammaticStructuredSamplingTextBlock("sampled via structured tool loop")],
+                        "fake-model",
+                        "endTurn");
+                }
+            });
+        using var services = new SamplingServiceProvider(
+            publicClient: publicClient,
+            structuredClient: structuredClient,
+            samplingTools: new FakeSamplingToolRegistry());
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return await programmatic.client.sample({
+                        messages: [{ role: "user", text: "Hello" }],
+                        enableTools: true,
+                        allowedToolNames: ["lookup"]
+                    });
+                }
+                """,
+                VisibleApiPaths: Array.Empty<string>(),
+                Services: services));
+
+        Assert.Equal("sampled via structured tool loop", result.Result?.GetValue<string>());
+        Assert.Equal(0, publicClient.CallCount);
+        Assert.Equal(2, structuredClient.CallCount);
+    }
+
+    [Fact]
+    public async Task ClientSampleUsesTheStructuredPathForToolEnabledRequestsEvenWhenOneServiceImplementsBothInterfaces()
+    {
+        var fixture = CreateFixture();
+        var client = new DualInterfaceSamplingClient(
+            new Func<ProgrammaticStructuredSamplingRequest, ProgrammaticStructuredSamplingResult>[]
+            {
+                _ => new ProgrammaticStructuredSamplingResult(
+                    "assistant",
+                    [new ProgrammaticStructuredSamplingToolUseBlock("tool-1", "lookup", new JsonObject { ["name"] = "world" })],
+                    "fake-model",
+                    "toolUse"),
+                _ => new ProgrammaticStructuredSamplingResult(
+                    "assistant",
+                    [new ProgrammaticStructuredSamplingTextBlock("dual-interface structured path")],
+                    "fake-model",
+                    "endTurn")
+            });
+        using var services = new SamplingServiceProvider(
+            publicClient: client,
+            structuredClient: client,
+            samplingTools: new FakeSamplingToolRegistry());
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return await programmatic.client.sample({
+                        messages: [{ role: "user", text: "Hello" }],
+                        enableTools: true,
+                        allowedToolNames: ["lookup"]
+                    });
+                }
+                """,
+                VisibleApiPaths: Array.Empty<string>(),
+                Services: services));
+
+        Assert.Equal("dual-interface structured path", result.Result?.GetValue<string>());
+        Assert.Equal(0, client.PublicCallCount);
+        Assert.Equal(2, client.StructuredCallCount);
+    }
+
+    [Fact]
+    public async Task ClientSampleRequiresAnExplicitReadOnlyScopeEvenWithAnInjectedSamplingClient()
+    {
+        var fixture = CreateFixture();
+        using var services = new SamplingServiceProvider(publicClient: new FakeSamplingClient());
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    try {
+                        return await programmatic.client.sample({
+                            messages: [{ role: "user", text: "Hello" }]
+                        });
+                    } catch (error) {
+                        return error.code;
+                    }
+                }
+                """,
+                Services: services));
+
+        Assert.Equal("sampling_requires_explicit_read_only_scope", result.Result?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ClientSampleBlocksVisibleMutationsEvenWithAnInjectedSamplingClient()
+    {
+        var fixture = CreateFixture();
+        using var services = new SamplingServiceProvider(publicClient: new FakeSamplingClient());
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    try {
+                        return await programmatic.client.sample({
+                            messages: [{ role: "user", text: "Hello" }]
+                        });
+                    } catch (error) {
+                        return error.code;
+                    }
+                }
+                """,
+                VisibleApiPaths: new[] { "tasks.complete" },
+                Services: services));
+
+        Assert.Equal("sampling_not_allowed_with_visible_mutations", result.Result?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CapabilityHandlersRequireAnExplicitReadOnlyScopeForSampling()
+    {
+        var fixture = CreateFixture(
+            configureBuilder: builder =>
+                builder.AddCapability<EmptyInput, string>(
+                    "diag.askClient",
+                    capability => capability
+                        .WithDescription("Requests a sample from the current client.")
+                        .UseWhen("You need to validate capability-context sampling.")
+                        .DoNotUseWhen("You are not testing sampling.")
+                        .WithHandler(
+                            async (_, context) =>
+                            {
+                                try
+                                {
+                                    var response = await context.GetSamplingClient().CreateMessageAsync(
+                                        new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "Hello")]),
+                                        context.CancellationToken);
+                                    return response.Text;
+                                }
+                                catch (ProgrammaticSamplingException exception)
+                                {
+                                    return exception.Code;
+                                }
+                            })));
+        using var services = new SamplingServiceProvider(publicClient: new FakeSamplingClient());
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return await programmatic.diag.askClient({});
+                }
+                """,
+                Services: services));
+
+        Assert.Equal("sampling_requires_explicit_read_only_scope", result.Result?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CapabilityHandlersBlockVisibleMutationsForSampling()
+    {
+        var fixture = CreateFixture(
+            configureBuilder: builder =>
+                builder.AddCapability<EmptyInput, string>(
+                    "diag.askClient",
+                    capability => capability
+                        .WithDescription("Requests a sample from the current client.")
+                        .UseWhen("You need to validate capability-context sampling.")
+                        .DoNotUseWhen("You are not testing sampling.")
+                        .WithHandler(
+                            async (_, context) =>
+                            {
+                                try
+                                {
+                                    var response = await context.GetSamplingClient().CreateMessageAsync(
+                                        new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "Hello")]),
+                                        context.CancellationToken);
+                                    return response.Text;
+                                }
+                                catch (ProgrammaticSamplingException exception)
+                                {
+                                    return exception.Code;
+                                }
+                            })));
+        using var services = new SamplingServiceProvider(publicClient: new FakeSamplingClient());
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return await programmatic.diag.askClient({});
+                }
+                """,
+                VisibleApiPaths: new[] { "diag.askClient", "tasks.complete" },
+                Services: services));
+
+        Assert.Equal("sampling_not_allowed_with_visible_mutations", result.Result?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task MutationPreviewHandlersReceiveBlockedSamplingClients()
+    {
+        var fixture = CreateFixture(
+            configureBuilder: builder =>
+                builder.AddMutation<TaskMutationArgs, string, TaskMutationApplyResult>(
+                    "tasks.inspectSampling",
+                    mutation => mutation
+                        .WithDescription("Reports the mutation-context sampling code.")
+                        .UseWhen("You need to validate mutation-context sampling.")
+                        .DoNotUseWhen("You are not testing sampling.")
+                        .WithPreviewHandler(
+                            async (_, context) =>
+                            {
+                                try
+                                {
+                                    var client = ProgrammaticSamplingServiceResolver.ResolvePublic(context.Services);
+                                    var response = await client.CreateMessageAsync(
+                                        new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "Hello")]),
+                                        context.CancellationToken);
+                                    return response.Text;
+                                }
+                                catch (ProgrammaticSamplingException exception)
+                                {
+                                    return exception.Code;
+                                }
+                            })
+                        .WithSummaryFactory((args, _, _) => ValueTask.FromResult($"Inspect {args.TaskId}"))
+                        .WithApplyHandler((args, _) => ValueTask.FromResult(MutationApplyResult<TaskMutationApplyResult>.Success(new TaskMutationApplyResult(args.TaskId, "done"))))));
+        using var services = new SamplingServiceProvider(publicClient: new FakeSamplingClient());
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return await programmatic.tasks.inspectSampling({ taskId: "task-1" });
+                }
+                """,
+                CallerBindingId: "binding-1",
+                VisibleApiPaths: new[] { "tasks.inspectSampling" },
+                Services: services));
+
+        Assert.Equal("sampling_not_allowed_in_mutation_context", result.ApprovalsRequested.Single().Preview?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CapabilityExecutionScopesKeepPublicAndStructuredSamplingStatesAligned()
+    {
+        var fixture = CreateFixture(
+            configureBuilder: builder =>
+                builder.AddCapability<EmptyInput, SamplingClientState>(
+                    "diag.inspectSamplingState",
+                    capability => capability
+                        .WithDescription("Inspects public and structured sampling state.")
+                        .UseWhen("You need to validate paired sampling-state overlays.")
+                        .DoNotUseWhen("You are not testing sampling.")
+                        .WithHandler(
+                            (_, context) =>
+                            {
+                                var publicClient = ProgrammaticSamplingServiceResolver.ResolvePublic(context.Services);
+                                var structuredClient = ProgrammaticSamplingServiceResolver.ResolveStructured(context.Services);
+                                return ValueTask.FromResult(
+                                    new SamplingClientState(
+                                        publicClient.IsSupported,
+                                        publicClient.SupportsToolUse,
+                                        structuredClient.IsSupported,
+                                        structuredClient.SupportsToolUse));
+                            })));
+        using var services = new SamplingServiceProvider(publicClient: new FakeSamplingClient());
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return await programmatic.diag.inspectSamplingState({});
+                }
+                """,
+                VisibleApiPaths: new[] { "diag.inspectSamplingState" },
+                Services: services));
+
+        Assert.Equal(
+            """{"publicIsSupported":true,"publicSupportsToolUse":false,"structuredIsSupported":true,"structuredSupportsToolUse":false}""",
+            CanonicalJson.Serialize(result.Result));
     }
 
     [Fact]
@@ -787,4 +1212,193 @@ public sealed class JintCodeExecutorTests
     private sealed record TaskMutationApplyResult(string TaskId, string Status);
 
     private sealed record LargePreview(string TaskId, string Payload);
+
+    private sealed record SamplingClientState(
+        bool PublicIsSupported,
+        bool PublicSupportsToolUse,
+        bool StructuredIsSupported,
+        bool StructuredSupportsToolUse);
+
+    private sealed class FakeSamplingClient : IProgrammaticSamplingClient
+    {
+        public bool IsSupported => true;
+
+        public bool SupportsToolUse => false;
+
+        public ValueTask<ProgrammaticSamplingResult> CreateMessageAsync(ProgrammaticSamplingRequest request, CancellationToken cancellationToken = default)
+        {
+            var text = request.Messages.Single().Text;
+            return ValueTask.FromResult(new ProgrammaticSamplingResult("sampled:" + text, "fake-model", "endTurn"));
+        }
+    }
+
+    private sealed class ThrowingSamplingClient(string code) : IProgrammaticSamplingClient
+    {
+        public int CallCount { get; private set; }
+
+        public bool IsSupported => true;
+
+        public bool SupportsToolUse => false;
+
+        public ValueTask<ProgrammaticSamplingResult> CreateMessageAsync(ProgrammaticSamplingRequest request, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return ValueTask.FromException<ProgrammaticSamplingResult>(new ProgrammaticSamplingException(code, "The public sampling client should not have been used."));
+        }
+    }
+
+    private sealed class ScriptedStructuredSamplingClient(
+        IReadOnlyList<Func<ProgrammaticStructuredSamplingRequest, ProgrammaticStructuredSamplingResult>> responses) : IProgrammaticStructuredSamplingClient
+    {
+        private readonly Queue<Func<ProgrammaticStructuredSamplingRequest, ProgrammaticStructuredSamplingResult>> _responses = new(responses);
+
+        public int CallCount { get; private set; }
+
+        public bool IsSupported => true;
+
+        public bool SupportsToolUse => true;
+
+        public ValueTask<ProgrammaticStructuredSamplingResult> CreateMessageAsync(
+            ProgrammaticStructuredSamplingRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            if (_responses.Count == 0)
+            {
+                throw new Xunit.Sdk.XunitException("No scripted structured sampling response remained.");
+            }
+
+            return ValueTask.FromResult(_responses.Dequeue()(request));
+        }
+    }
+
+    private sealed class DualInterfaceSamplingClient(
+        IReadOnlyList<Func<ProgrammaticStructuredSamplingRequest, ProgrammaticStructuredSamplingResult>> responses) : IProgrammaticSamplingClient, IProgrammaticStructuredSamplingClient
+    {
+        private readonly Queue<Func<ProgrammaticStructuredSamplingRequest, ProgrammaticStructuredSamplingResult>> _responses = new(responses);
+
+        public int PublicCallCount { get; private set; }
+
+        public int StructuredCallCount { get; private set; }
+
+        public bool IsSupported => true;
+
+        public bool SupportsToolUse => true;
+
+        public ValueTask<ProgrammaticSamplingResult> CreateMessageAsync(ProgrammaticSamplingRequest request, CancellationToken cancellationToken = default)
+        {
+            PublicCallCount++;
+            return ValueTask.FromException<ProgrammaticSamplingResult>(
+                new ProgrammaticSamplingException("public_client_used", "The public sampling interface should not have been used for tool-enabled JS sampling."));
+        }
+
+        public ValueTask<ProgrammaticStructuredSamplingResult> CreateMessageAsync(
+            ProgrammaticStructuredSamplingRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            StructuredCallCount++;
+            if (_responses.Count == 0)
+            {
+                throw new Xunit.Sdk.XunitException("No dual-interface structured sampling response remained.");
+            }
+
+            return ValueTask.FromResult(_responses.Dequeue()(request));
+        }
+    }
+
+    private sealed class FakeSamplingToolRegistry : IProgrammaticSamplingToolRegistry
+    {
+        private static readonly ProgrammaticStructuredSamplingToolDefinition LookupTool = new(
+            "lookup",
+            "Looks up a canned response.",
+            new JsonObject
+            {
+                ["type"] = "object",
+                ["additionalProperties"] = false,
+                ["properties"] = new JsonObject
+                {
+                    ["name"] = new JsonObject { ["type"] = "string" }
+                },
+                ["required"] = new JsonArray("name")
+            });
+
+        public IReadOnlyList<ProgrammaticStructuredSamplingToolDefinition> Tools { get; } = [LookupTool];
+
+        public bool TryGetDefinition(string name, out ProgrammaticStructuredSamplingToolDefinition definition)
+        {
+            if (string.Equals(name, LookupTool.Name, StringComparison.Ordinal))
+            {
+                definition = LookupTool;
+                return true;
+            }
+
+            definition = null!;
+            return false;
+        }
+
+        public ValueTask<ProgrammaticSamplingToolExecutionResult> InvokeAsync(
+            string name,
+            JsonObject arguments,
+            ProgrammaticSamplingToolContext context,
+            CancellationToken cancellationToken = default)
+        {
+            Assert.Equal("lookup", name);
+            Assert.Equal("world", arguments["name"]?.GetValue<string>());
+            return ValueTask.FromResult(
+                new ProgrammaticSamplingToolExecutionResult(
+                    """{"result":"world"}""",
+                    new JsonObject { ["result"] = "world" }));
+        }
+    }
+
+    private sealed class SamplingServiceProvider(
+        IProgrammaticSamplingClient? publicClient = null,
+        IProgrammaticStructuredSamplingClient? structuredClient = null,
+        IProgrammaticSamplingToolRegistry? samplingTools = null) : IServiceProvider, IServiceScopeFactory, IDisposable
+    {
+        public object? GetService(Type serviceType)
+        {
+            if (serviceType == typeof(IServiceProvider))
+            {
+                return this;
+            }
+
+            if (serviceType == typeof(IServiceScopeFactory))
+            {
+                return this;
+            }
+
+            if (serviceType == typeof(IProgrammaticSamplingClient))
+            {
+                return publicClient;
+            }
+
+            if (serviceType == typeof(IProgrammaticStructuredSamplingClient))
+            {
+                return structuredClient;
+            }
+
+            if (serviceType == typeof(IProgrammaticSamplingToolRegistry))
+            {
+                return samplingTools;
+            }
+
+            return null;
+        }
+
+        public IServiceScope CreateScope() => new SamplingServiceScope(this);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class SamplingServiceScope(IServiceProvider services) : IServiceScope
+        {
+            public IServiceProvider ServiceProvider { get; } = services;
+
+            public void Dispose()
+            {
+            }
+        }
+    }
 }
