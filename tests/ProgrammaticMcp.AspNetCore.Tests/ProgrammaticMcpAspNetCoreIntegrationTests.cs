@@ -17,6 +17,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
@@ -455,6 +456,95 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
             });
 
         Assert.Equal("completed", apply.StructuredContent["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task DotNetSdkHarnessCookieFallbackSupportsReconnectMutationFlow()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.EnableStatefulHttpTransport = false);
+
+        var cookieContainer = new CookieContainer();
+        await using var initialClient = await host.CreateSdkClientAsync(cookieContainer: cookieContainer, includeDefaultOrigin: true);
+        var preview = await initialClient.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sdk-cookie-fallback",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.complete({ taskId: "sdk-cookie-task" });
+                           }
+                           """
+            });
+
+        var previewNode = ParseStructuredContent(preview);
+        var approval = Assert.Single(previewNode["approvalsRequested"]!.AsArray());
+        var cookies = cookieContainer.GetCookies(new Uri(host.BaseAddress, host.McpPath)).Cast<Cookie>().ToArray();
+        var cookie = Assert.Single(cookies);
+        Assert.Equal(ProgrammaticMcpServerOptions.DefaultCookieName, cookie.Name);
+
+        await using var reconnectedClient = await host.CreateSdkClientAsync(cookieContainer: cookieContainer, includeDefaultOrigin: true);
+        var listed = await reconnectedClient.CallToolAsync(
+            "mutation.list",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sdk-cookie-fallback"
+            });
+
+        var listedNode = ParseStructuredContent(listed);
+        var item = Assert.Single(listedNode["items"]!.AsArray());
+        Assert.Equal(approval!["approvalId"]!.GetValue<string>(), item!["approvalId"]!.GetValue<string>());
+
+        var apply = await reconnectedClient.CallToolAsync(
+            "mutation.apply",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sdk-cookie-fallback",
+                ["approvalId"] = approval["approvalId"]!.GetValue<string>(),
+                ["approvalNonce"] = approval["approvalNonce"]!.GetValue<string>()
+            });
+
+        Assert.Equal("completed", ParseStructuredContent(apply)["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task DotNetSdkHarnessSignedHeaderFallbackSupportsReconnectMutationFlow()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            enableSignedHeader: true,
+            configureOptions: options => options.EnableStatefulHttpTransport = false);
+        var token = host.Services.GetRequiredService<IProgrammaticCallerBindingTokenService>().CreateSignedHeaderToken("sdk-header-client");
+
+        await using var initialClient = await host.CreateSdkClientAsync(signedHeaderToken: token);
+        var preview = await initialClient.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sdk-header-fallback",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.complete({ taskId: "sdk-header-task" });
+                           }
+                           """
+            });
+
+        var previewNode = ParseStructuredContent(preview);
+        var approval = Assert.Single(previewNode["approvalsRequested"]!.AsArray());
+        var storedApproval = Assert.Single(await host.Services.GetRequiredService<IApprovalStore>().ListAllAsync());
+        Assert.Equal("sdk-header-client", storedApproval.CallerBindingId);
+
+        await using var reconnectedClient = await host.CreateSdkClientAsync(signedHeaderToken: token);
+        var apply = await reconnectedClient.CallToolAsync(
+            "mutation.apply",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-sdk-header-fallback",
+                ["approvalId"] = approval!["approvalId"]!.GetValue<string>(),
+                ["approvalNonce"] = approval["approvalNonce"]!.GetValue<string>()
+            });
+
+        Assert.Equal("completed", ParseStructuredContent(apply)["status"]!.GetValue<string>());
     }
 
     [Fact]
@@ -1457,6 +1547,47 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
                     Endpoint = new Uri(BaseAddress, McpPath),
                     TransportMode = HttpTransportMode.StreamableHttp
                 });
+            return await McpClient.CreateAsync(transport);
+        }
+
+        public async Task<McpClient> CreateSdkClientAsync(
+            CookieContainer? cookieContainer = null,
+            string? signedHeaderToken = null,
+            bool includeDefaultOrigin = false)
+        {
+            var handler = new HttpClientHandler
+            {
+                UseCookies = cookieContainer is not null,
+                CookieContainer = cookieContainer ?? new CookieContainer()
+            };
+
+            var client = new HttpClient(handler)
+            {
+                BaseAddress = BaseAddress
+            };
+
+            if (includeDefaultOrigin && client.BaseAddress is not null)
+            {
+                client.DefaultRequestHeaders.TryAddWithoutValidation(
+                    "Origin",
+                    new Uri(client.BaseAddress, "/").GetLeftPart(UriPartial.Authority));
+            }
+
+            if (!string.IsNullOrWhiteSpace(signedHeaderToken))
+            {
+                client.DefaultRequestHeaders.Add(ProgrammaticMcpServerOptions.DefaultSignedHeaderName, signedHeaderToken);
+            }
+
+            var transport = new HttpClientTransport(
+                new HttpClientTransportOptions
+                {
+                    Endpoint = new Uri(BaseAddress, McpPath),
+                    TransportMode = HttpTransportMode.StreamableHttp
+                },
+                client,
+                NullLoggerFactory.Instance,
+                ownsHttpClient: true);
+
             return await McpClient.CreateAsync(transport);
         }
 
