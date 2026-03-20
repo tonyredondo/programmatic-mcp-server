@@ -54,6 +54,44 @@ The implementation plan is organized around three library packages and one sampl
 - `samples/ProgrammaticMcp.SampleServer`
   A small reference server used to prove the library design end to end.
 
+## Minimal Host Example
+
+The smallest useful host wires the builder, opts into a mutation authorization policy, and maps the MCP route:
+
+```csharp
+using ProgrammaticMcp;
+using ProgrammaticMcp.AspNetCore;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddProgrammaticMcpServer(options =>
+{
+    options.Builder
+        .AllowAllBoundCallers()
+        .AddCapability<WeatherInput, WeatherResult>(
+            "weather.current",
+            capability => capability
+                .WithDescription("Returns the current weather.")
+                .UseWhen("You need a read-only weather lookup.")
+                .DoNotUseWhen("You need to mutate data.")
+                .WithHandler((input, _) => ValueTask.FromResult(new WeatherResult(input.City, "sunny"))));
+});
+
+var app = builder.Build();
+app.MapProgrammaticMcpServer("/mcp");
+app.Run();
+
+public sealed record WeatherInput(string City);
+public sealed record WeatherResult(string City, string Conditions);
+```
+
+That gives the host:
+
+- `POST /mcp`
+- `GET /mcp/types`
+
+The generated discovery, TypeScript, execution, artifact, and mutation surfaces all come from that single registration source.
+
 ## Important V0 Constraints
 
 The current implementation is intentionally narrow:

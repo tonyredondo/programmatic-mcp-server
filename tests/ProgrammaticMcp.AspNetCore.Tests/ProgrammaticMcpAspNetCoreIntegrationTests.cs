@@ -54,6 +54,30 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     }
 
     [Fact]
+    public async Task InitializeInstructionsReflectConfiguredCallerBindingModes()
+    {
+        await using var cookieOnlyHost = await ProgrammaticMcpTestHost.StartAsync();
+        await using var cookieOnlyClient = await cookieOnlyHost.CreateSessionClientAsync();
+        Assert.Contains("built-in HTTP fallback via cookie", cookieOnlyClient.ServerInstructions, StringComparison.Ordinal);
+
+        await using var signedHeaderHost = await ProgrammaticMcpTestHost.StartAsync(
+            enableSignedHeader: true,
+            configureOptions: options => options.EnableCookieCallerBinding = false);
+        await using var signedHeaderClient = await signedHeaderHost.CreateSessionClientAsync();
+        Assert.Contains("built-in HTTP fallback via signed header", signedHeaderClient.ServerInstructions, StringComparison.Ordinal);
+        Assert.DoesNotContain("cookie or signed header", signedHeaderClient.ServerInstructions, StringComparison.Ordinal);
+
+        await using var noFallbackHost = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options =>
+            {
+                options.EnableCookieCallerBinding = false;
+                options.EnableSignedHeaderCallerBinding = false;
+            });
+        await using var noFallbackClient = await noFallbackHost.CreateSessionClientAsync();
+        Assert.Contains("no built-in HTTP fallback is enabled", noFallbackClient.ServerInstructions, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task TypesEndpointReturnsDeclarationsAndCacheValidators()
     {
         await using var host = await ProgrammaticMcpTestHost.StartAsync();
@@ -534,6 +558,27 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         Assert.Equal("invalid_params", ParseStructuredContent(invalidArtifactRead)["error"]!["code"]!.GetValue<string>());
     }
 
+    [Fact]
+    public async Task InvalidVisibleApiPathsReturnInvalidParams()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync();
+        await using var client = await host.CreateSessionClientAsync();
+
+        var result = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-visible-invalid",
+                ["visibleApiPaths"] = new[] { "missing.capability" },
+                ["code"] = "async function main() { return 1; }"
+            });
+
+        var node = ParseStructuredContent(result);
+        Assert.True(result.IsError ?? false, node.ToJsonString());
+        Assert.Equal("invalid_params", node["error"]!["code"]!.GetValue<string>());
+        Assert.Contains("Visible API path", node["error"]!["message"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
     [Theory]
     [MemberData(nameof(InvalidConversationIdCases))]
     public async Task ConversationScopedToolsRejectInvalidConversationIdsAtTheToolBoundary(string toolName, Dictionary<string, object?> arguments)
@@ -687,6 +732,116 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
                 ["artifactId"] = artifactId
             });
         Assert.False(ParseStructuredContent(artifactRead)["found"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task ApplyHandlerExceptionsReturnApplyHandlerError()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            includeDefaultCatalog: false,
+            configureCatalog: catalog =>
+            {
+                catalog.AddMutation<CompleteTaskArgs, CompleteTaskPreview, CompleteTaskApplyResult>(
+                    "tasks.boom",
+                    mutation => mutation
+                        .WithDescription("Throws during apply.")
+                        .UseWhen("You are testing error mapping.")
+                        .DoNotUseWhen("You are doing normal work.")
+                        .WithPreviewHandler((args, _) => ValueTask.FromResult(new CompleteTaskPreview(args.TaskId, true)))
+                        .WithSummaryFactory((args, _, _) => ValueTask.FromResult("Boom " + args.TaskId))
+                        .WithApplyHandler((_, _) => throw new InvalidOperationException("boom")));
+            });
+        await using var client = await host.CreateSessionClientAsync();
+
+        var preview = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-apply-handler-error",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.boom({ taskId: "task-1" });
+                           }
+                           """
+            });
+
+        var approval = Assert.Single(ParseStructuredContent(preview)["approvalsRequested"]!.AsArray());
+        var apply = await client.CallToolAsync(
+            "mutation.apply",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-apply-handler-error",
+                ["approvalId"] = approval!["approvalId"]!.GetValue<string>(),
+                ["approvalNonce"] = approval["approvalNonce"]!.GetValue<string>()
+            });
+
+        var applyNode = ParseStructuredContent(apply);
+        Assert.Equal("failed", applyNode["status"]!.GetValue<string>());
+        Assert.Equal("apply_handler_error", applyNode["failureCode"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ApplyArtifactsUseConfiguredChunkSizeInDescriptors()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            includeDefaultCatalog: false,
+            configureOptions: options =>
+            {
+                options.ExecutorOptions = options.ExecutorOptions with
+                {
+                    ArtifactRetention = options.ExecutorOptions.ArtifactRetention with
+                    {
+                        ArtifactChunkBytes = 5
+                    }
+                };
+            },
+            configureCatalog: catalog =>
+            {
+                catalog.AddMutation<CompleteTaskArgs, CompleteTaskPreview, CompleteTaskApplyResult>(
+                    "tasks.chunked",
+                    mutation => mutation
+                        .WithDescription("Writes a chunked apply artifact.")
+                        .UseWhen("You are testing artifact descriptors.")
+                        .DoNotUseWhen("You are doing normal work.")
+                        .WithPreviewHandler((args, _) => ValueTask.FromResult(new CompleteTaskPreview(args.TaskId, true)))
+                        .WithSummaryFactory((args, _, _) => ValueTask.FromResult("Chunk " + args.TaskId))
+                        .WithApplyHandler(
+                            async (args, context) =>
+                            {
+                                await context.Artifacts!.WriteTextArtifactAsync("chunked.txt", "abcdefghijk", "text/plain", context.CancellationToken);
+                                return MutationApplyResult<CompleteTaskApplyResult>.Success(new CompleteTaskApplyResult(args.TaskId, "done"));
+                            }));
+            });
+        await using var client = await host.CreateSessionClientAsync();
+
+        var preview = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-chunked-apply",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.chunked({ taskId: "task-1" });
+                           }
+                           """
+            });
+
+        var approval = Assert.Single(ParseStructuredContent(preview)["approvalsRequested"]!.AsArray());
+        var apply = await client.CallToolAsync(
+            "mutation.apply",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-chunked-apply",
+                ["approvalId"] = approval!["approvalId"]!.GetValue<string>(),
+                ["approvalNonce"] = approval["approvalNonce"]!.GetValue<string>()
+            });
+
+        var applyNode = ParseStructuredContent(apply);
+        var artifactNode = Assert.Single(applyNode["artifacts"]!.AsArray());
+        Assert.NotNull(artifactNode);
+        var artifact = artifactNode!.AsObject();
+        Assert.Equal(11, artifact["totalBytes"]!.GetValue<int>());
+        Assert.Equal(3, artifact["totalChunks"]!.GetValue<int>());
     }
 
     [Fact]
@@ -945,6 +1100,100 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         Assert.Equal("code.execute", toolActivity.Tags.Single(tag => tag.Key == "mcp.tool.name").Value);
         Assert.Contains(loggerProvider.Entries, entry => entry.Message.Contains("Programmatic code execution finished.", StringComparison.Ordinal));
         Assert.Contains(loggerProvider.Entries, entry => entry.Message.Contains("ApiCalls=", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task GracefulShutdownForceCancelsInFlightMutationApplyAndMarksApprovalTerminal()
+    {
+        var probe = new CancellationProbe();
+
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options => options.GracefulShutdownTimeout = TimeSpan.FromMilliseconds(100),
+            includeDefaultCatalog: false,
+            configureServices: services => services.AddSingleton(probe),
+            configureCatalog: catalog =>
+            {
+                catalog.AllowAllBoundCallers();
+                catalog.AddMutation<CompleteTaskArgs, CompleteTaskPreview, CompleteTaskApplyResult>(
+                    "tasks.blockApply",
+                    mutation => mutation
+                        .WithDescription("Blocks during apply until cancelled.")
+                        .UseWhen("You need to test forced shutdown cancellation.")
+                        .DoNotUseWhen("You are doing normal work.")
+                        .WithPreviewHandler((args, _) => ValueTask.FromResult(new CompleteTaskPreview(args.TaskId, true)))
+                        .WithSummaryFactory((args, _, _) => ValueTask.FromResult("Block " + args.TaskId))
+                        .WithApplyHandler(
+                            async (_, context) =>
+                            {
+                                var localProbe = context.Services.GetRequiredService<CancellationProbe>();
+                                localProbe.Started.TrySetResult();
+                                try
+                                {
+                                    await Task.Delay(Timeout.InfiniteTimeSpan, context.CancellationToken);
+                                }
+                                catch (OperationCanceledException)
+                                {
+                                    localProbe.Cancelled.TrySetResult();
+                                    throw;
+                                }
+
+                                return MutationApplyResult<CompleteTaskApplyResult>.Success(new CompleteTaskApplyResult("never", "never"));
+                            }));
+            });
+        var store = host.Services.GetRequiredService<IApprovalStore>();
+        var cookieContainer = new CookieContainer();
+        await using var client = host.CreateRawClient(cookieContainer: cookieContainer);
+
+        await client.InitializeAsync();
+        var preview = await client.CallToolAsync(
+            "code.execute",
+            new JsonObject
+            {
+                ["conversationId"] = "conv-force-cancel",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.blockApply({ taskId: "task-1" });
+                           }
+                           """
+            });
+
+        var approval = Assert.Single(preview.StructuredContent["approvalsRequested"]!.AsArray());
+        var approvalId = approval!["approvalId"]!.GetValue<string>();
+        var approvalNonce = approval["approvalNonce"]!.GetValue<string>();
+
+        var applyTask = client.CallToolAsync(
+            "mutation.apply",
+            new JsonObject
+            {
+                ["conversationId"] = "conv-force-cancel",
+                ["approvalId"] = approvalId,
+                ["approvalNonce"] = approvalNonce
+            });
+
+        await probe.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await host.StopAsync();
+
+        RawMcpResponse? applyResponse = null;
+        try
+        {
+            applyResponse = await applyTask;
+        }
+        catch (HttpRequestException)
+        {
+        }
+
+        await probe.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var storedApproval = await store.GetAsync(approvalId);
+        Assert.NotNull(storedApproval);
+        Assert.Equal(ApprovalState.FailedTerminal, storedApproval!.State);
+        Assert.Equal("apply_outcome_unknown", storedApproval.FailureCode);
+
+        if (applyResponse is not null)
+        {
+            Assert.Equal("failed", applyResponse.StructuredContent["status"]!.GetValue<string>());
+            Assert.Equal("apply_outcome_unknown", applyResponse.StructuredContent["failureCode"]!.GetValue<string>());
+        }
     }
 
     private static JsonObject ParseStructuredContent(CallToolResult result)

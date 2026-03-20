@@ -184,6 +184,51 @@ public sealed class ProgrammaticMcpSampleServerTests
         Assert.Equal("validation_failed", apply["failureCode"]!.GetValue<string>());
     }
 
+    [Fact]
+    public async Task SampleServerSupportsMutationCancel()
+    {
+        await using var factory = CreateFactory();
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+        var rawClient = new SampleRawMcpClient(client);
+
+        await rawClient.InitializeAsync();
+        var preview = await rawClient.CallToolAsync(
+            "code.execute",
+            new JsonObject
+            {
+                ["conversationId"] = "sample-cancel",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.complete({ taskId: "task-1" });
+                           }
+                           """
+            });
+
+        var approval = Assert.Single(preview["approvalsRequested"]!.AsArray());
+        var approvalId = approval!["approvalId"]!.GetValue<string>();
+        var approvalNonce = approval["approvalNonce"]!.GetValue<string>();
+
+        var cancel = await rawClient.CallToolAsync(
+            "mutation.cancel",
+            new JsonObject
+            {
+                ["conversationId"] = "sample-cancel",
+                ["approvalId"] = approvalId,
+                ["approvalNonce"] = approvalNonce
+            });
+
+        Assert.Equal("cancelled", cancel["status"]!.GetValue<string>());
+
+        var list = await rawClient.CallToolAsync(
+            "mutation.list",
+            new JsonObject
+            {
+                ["conversationId"] = "sample-cancel"
+            });
+
+        Assert.Empty(list["items"]!.AsArray());
+    }
+
     private static WebApplicationFactory<Program> CreateFactory()
     {
         return new WebApplicationFactory<Program>()

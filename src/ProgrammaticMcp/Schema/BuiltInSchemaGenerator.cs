@@ -19,7 +19,13 @@ public sealed class BuiltInSchemaGenerator
     public JsonNode Generate(Type type)
     {
         var objectCounts = CountObjectReferences(type, new Dictionary<Type, int>());
-        var generated = GenerateNode(type, isRoot: true, objectCounts, new Dictionary<Type, string>(), new SortedDictionary<string, JsonNode>(StringComparer.Ordinal));
+        var generated = GenerateNode(
+            type,
+            isRoot: true,
+            objectCounts,
+            new Dictionary<Type, string>(),
+            new Dictionary<string, Type>(StringComparer.Ordinal),
+            new SortedDictionary<string, JsonNode>(StringComparer.Ordinal));
         generated["$schema"] = ProgrammaticContractConstants.JsonSchemaDialect;
         return generated;
     }
@@ -75,9 +81,10 @@ public sealed class BuiltInSchemaGenerator
         bool isRoot,
         IReadOnlyDictionary<Type, int> objectCounts,
         Dictionary<Type, string> assignedDefinitionNames,
+        Dictionary<string, Type> assignedDefinitionTypes,
         SortedDictionary<string, JsonNode> definitions)
     {
-        var node = GenerateSchema(type, isRoot, objectCounts, assignedDefinitionNames, definitions);
+        var node = GenerateSchema(type, isRoot, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions);
         if (isRoot && definitions.Count > 0)
         {
             var definitionsObject = new JsonObject();
@@ -97,6 +104,7 @@ public sealed class BuiltInSchemaGenerator
         bool isRoot,
         IReadOnlyDictionary<Type, int> objectCounts,
         Dictionary<Type, string> assignedDefinitionNames,
+        Dictionary<string, Type> assignedDefinitionTypes,
         SortedDictionary<string, JsonNode> definitions)
     {
         var effectiveType = UnwrapNullable(type);
@@ -110,7 +118,7 @@ public sealed class BuiltInSchemaGenerator
             return new JsonObject
             {
                 ["type"] = "array",
-                ["items"] = GenerateSchema(elementType!, false, objectCounts, assignedDefinitionNames, definitions)
+                ["items"] = GenerateSchema(elementType!, false, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions)
             };
         }
 
@@ -119,7 +127,7 @@ public sealed class BuiltInSchemaGenerator
             return new JsonObject
             {
                 ["type"] = "object",
-                ["additionalProperties"] = GenerateSchema(valueType!, false, objectCounts, assignedDefinitionNames, definitions)
+                ["additionalProperties"] = GenerateSchema(valueType!, false, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions)
             };
         }
 
@@ -132,21 +140,22 @@ public sealed class BuiltInSchemaGenerator
         {
             if (!assignedDefinitionNames.TryGetValue(effectiveType, out var definitionName))
             {
-                definitionName = SchemaNaming.ToDefinitionName(effectiveType);
+                definitionName = SchemaNaming.ResolveDefinitionName(effectiveType, assignedDefinitionTypes);
                 assignedDefinitionNames[effectiveType] = definitionName;
-                definitions[definitionName] = GenerateObjectSchema(effectiveType, objectCounts, assignedDefinitionNames, definitions);
+                definitions[definitionName] = GenerateObjectSchema(effectiveType, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions);
             }
 
             return new JsonObject { ["$ref"] = $"#/$defs/{definitionName}" };
         }
 
-        return GenerateObjectSchema(effectiveType, objectCounts, assignedDefinitionNames, definitions);
+        return GenerateObjectSchema(effectiveType, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions);
     }
 
     private JsonObject GenerateObjectSchema(
         Type type,
         IReadOnlyDictionary<Type, int> objectCounts,
         Dictionary<Type, string> assignedDefinitionNames,
+        Dictionary<string, Type> assignedDefinitionTypes,
         SortedDictionary<string, JsonNode> definitions)
     {
         var properties = new JsonObject();
@@ -154,7 +163,7 @@ public sealed class BuiltInSchemaGenerator
 
         foreach (var property in GetSerializableProperties(type))
         {
-            var propertySchema = GenerateSchema(property.PropertyType, false, objectCounts, assignedDefinitionNames, definitions);
+            var propertySchema = GenerateSchema(property.PropertyType, false, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions);
             properties[property.Name] = propertySchema;
 
             if (property.Required)
@@ -354,7 +363,40 @@ public sealed class BuiltInSchemaGenerator
 
 internal static class SchemaNaming
 {
-    public static string ToDefinitionName(Type type)
+    public static string ResolveDefinitionName(Type type, IDictionary<string, Type> assignedDefinitionTypes)
+    {
+        var baseName = ToDefinitionName(type);
+        if (!assignedDefinitionTypes.TryGetValue(baseName, out var existingType))
+        {
+            assignedDefinitionTypes[baseName] = type;
+            return baseName;
+        }
+
+        if (existingType == type)
+        {
+            return baseName;
+        }
+
+        var suffix = 2;
+        while (true)
+        {
+            var candidate = $"{baseName}{suffix}";
+            if (!assignedDefinitionTypes.TryGetValue(candidate, out existingType))
+            {
+                assignedDefinitionTypes[candidate] = type;
+                return candidate;
+            }
+
+            if (existingType == type)
+            {
+                return candidate;
+            }
+
+            suffix++;
+        }
+    }
+
+    private static string ToDefinitionName(Type type)
     {
         if (!type.IsGenericType)
         {

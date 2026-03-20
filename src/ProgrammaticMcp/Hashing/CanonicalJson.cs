@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -70,12 +69,6 @@ public static class CanonicalJson
     /// </summary>
     public static string NormalizeNumber(string raw)
     {
-        if (IsIntegerLiteral(raw)
-            && BigInteger.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var integer))
-        {
-            return integer.ToString(CultureInfo.InvariantCulture);
-        }
-
         if (!double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
         {
             throw new InvalidOperationException($"'{raw}' is not a valid JSON number.");
@@ -94,12 +87,6 @@ public static class CanonicalJson
         var text = SerializeDouble(value).Replace("E", "e", StringComparison.Ordinal);
         return NormalizeEcmaNumberText(text);
     }
-
-    private static bool IsIntegerLiteral(string raw)
-    {
-        return !raw.Contains('.', StringComparison.Ordinal) && !raw.Contains('e', StringComparison.OrdinalIgnoreCase);
-    }
-
     private static string SerializeDouble(double value)
     {
         using var buffer = new MemoryStream();

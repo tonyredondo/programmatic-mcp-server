@@ -10,12 +10,86 @@ export NUGET_PACKAGES="$WORK_DIR/.nuget/packages"
 export NUGET_HTTP_CACHE_PATH="$WORK_DIR/.nuget/http-cache"
 export NUGET_PLUGINS_CACHE_PATH="$WORK_DIR/.nuget/plugins-cache"
 
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+read_zip_entry() {
+  local archive="$1"
+  local pattern="$2"
+  local entry
+  entry="$(zipinfo -1 "$archive" | rg "$pattern" | head -n 1 || true)"
+  if [[ -z "$entry" ]]; then
+    echo "Missing archive entry matching '$pattern' in $archive" >&2
+    exit 1
+  fi
+
+  unzip -p "$archive" "$entry"
+}
+
+verify_package_metadata() {
+  local package_name="$1"
+  local package_file
+  package_file="$(find "$ARTIFACT_DIR" -maxdepth 1 -name "$package_name.[0-9]*.nupkg" | head -n 1)"
+  if [[ -z "$package_file" ]]; then
+    echo "Package not found for metadata verification: $package_name" >&2
+    exit 1
+  fi
+
+  local nuspec
+  nuspec="$(read_zip_entry "$package_file" '\.nuspec$')"
+  local readme_path
+  readme_path="$(printf '%s' "$nuspec" | rg -o '<readme>[^<]+</readme>' | sed -E 's#</?readme>##g')"
+
+  if [[ -z "$readme_path" ]]; then
+    echo "Package $package_name is missing nuspec <readme> metadata." >&2
+    exit 1
+  fi
+
+  [[ "$nuspec" == *"<id>$package_name</id>"* ]] || {
+    echo "Package $package_name has unexpected nuspec id." >&2
+    exit 1
+  }
+
+  [[ "$nuspec" == *"<version>0.1.0-preview.1</version>"* ]] || {
+    echo "Package $package_name has unexpected nuspec version." >&2
+    exit 1
+  }
+
+  printf '%s' "$nuspec" | rg -q '<description>.+</description>' || {
+    echo "Package $package_name is missing nuspec description metadata." >&2
+    exit 1
+  }
+
+  unzip -p "$package_file" "$readme_path" >/dev/null || {
+    echo "Package $package_name is missing the declared readme file $readme_path." >&2
+    exit 1
+  }
+
+  zipinfo -1 "$package_file" | rg -q '^lib/.+\.xml$' || {
+    echo "Package $package_name is missing XML documentation output." >&2
+    exit 1
+  }
+}
+
+require_command dotnet
+require_command rg
+require_command unzip
+require_command zipinfo
+
 echo "Packing library packages into $ARTIFACT_DIR"
 rm -rf "$ARTIFACT_DIR"
 dotnet restore "$ROOT_DIR/ProgrammaticMcp.sln" >/dev/null
 dotnet pack "$ROOT_DIR/src/ProgrammaticMcp/ProgrammaticMcp.csproj" --configuration Release --no-restore
 dotnet pack "$ROOT_DIR/src/ProgrammaticMcp.Jint/ProgrammaticMcp.Jint.csproj" --configuration Release --no-restore
 dotnet pack "$ROOT_DIR/src/ProgrammaticMcp.AspNetCore/ProgrammaticMcp.AspNetCore.csproj" --configuration Release --no-restore
+
+verify_package_metadata ProgrammaticMcp
+verify_package_metadata ProgrammaticMcp.Jint
+verify_package_metadata ProgrammaticMcp.AspNetCore
 
 APP_DIR="$WORK_DIR/package-smoke"
 dotnet new console -n PackageSmoke --framework net10.0 --output "$APP_DIR" >/dev/null

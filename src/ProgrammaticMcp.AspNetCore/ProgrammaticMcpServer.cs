@@ -350,10 +350,13 @@ internal sealed class ProgrammaticMcpActivitySource : IDisposable
 internal sealed class ProgrammaticMcpShutdownCoordinator
 {
     private readonly TaskCompletionSource _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly CancellationTokenSource _forcedCancellation = new();
     private int _activeOperations;
     private volatile bool _stopping;
 
     public bool IsStopping => _stopping;
+
+    public CancellationToken ForcedCancellationToken => _forcedCancellation.Token;
 
     public IDisposable Enter()
     {
@@ -375,9 +378,15 @@ internal sealed class ProgrammaticMcpShutdownCoordinator
         }
     }
 
-    public Task WaitForDrainAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    public async Task<bool> WaitForDrainAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
-        return Task.WhenAny(_drained.Task, Task.Delay(timeout, cancellationToken));
+        var completed = await Task.WhenAny(_drained.Task, Task.Delay(timeout, cancellationToken));
+        return completed == _drained.Task;
+    }
+
+    public void ForceCancelRemainingWork()
+    {
+        _forcedCancellation.Cancel();
     }
 
     private void Release()
@@ -560,7 +569,7 @@ internal sealed class ProgrammaticCallerBindingResolver(
             return new CallerBindingResolution(principalIdentity, "principal", null);
         }
 
-        var sessionIdentity = httpContext?.Request.Headers[ProgrammaticMcpServerOptions.McpSessionIdHeaderName].FirstOrDefault();
+        var sessionIdentity = GetTrustedSessionIdentity(context);
         if (!string.IsNullOrWhiteSpace(sessionIdentity))
         {
             return new CallerBindingResolution(sessionIdentity, "session", null);
@@ -577,7 +586,7 @@ internal sealed class ProgrammaticCallerBindingResolver(
             var headerValue = headerValues.FirstOrDefault();
             if (!string.IsNullOrWhiteSpace(headerValue))
             {
-                var token = Unprotect(headerValue, _headerProtector);
+                var token = Unprotect(headerValue, _headerProtector, HeaderPurpose);
                 if (token is not null && token.ExpiresAtUtc > DateTimeOffset.UtcNow && RouteMatches(token))
                 {
                     return new CallerBindingResolution(token.CallerBindingId, "signed_header", token.TokenId);
@@ -592,14 +601,14 @@ internal sealed class ProgrammaticCallerBindingResolver(
 
         if (httpContext.Request.Cookies.TryGetValue(options.CookieName, out var cookieValue))
         {
-            var token = Unprotect(cookieValue, _cookieProtector);
+            var token = Unprotect(cookieValue, _cookieProtector, CookiePurpose);
             if (token is not null && token.ExpiresAtUtc > DateTimeOffset.UtcNow && RouteMatches(token))
             {
                 EnsureSameOrigin(httpContext);
 
                 if (token.IssuedAtUtc.AddTicks((token.ExpiresAtUtc - token.IssuedAtUtc).Ticks / 2) <= DateTimeOffset.UtcNow)
                 {
-                    IssueCookie(httpContext, CreateToken(token.CallerBindingId, options.CookieLifetime));
+                    IssueCookie(httpContext, CreateToken(token.CallerBindingId, options.CookieLifetime, CookiePurpose));
                 }
 
                 return new CallerBindingResolution(token.CallerBindingId, "cookie", token.TokenId);
@@ -612,7 +621,7 @@ internal sealed class ProgrammaticCallerBindingResolver(
 
     public string CreateSignedHeaderToken(string callerBindingId)
     {
-        var token = CreateToken(callerBindingId, options.HeaderLifetime);
+        var token = CreateToken(callerBindingId, options.HeaderLifetime, HeaderPurpose);
         return _headerProtector.Protect(JsonSerializer.Serialize(token));
     }
 
@@ -634,12 +643,6 @@ internal sealed class ProgrammaticCallerBindingResolver(
             return ValueTask.CompletedTask;
         }
 
-        var sessionIdentity = httpContext.Request.Headers[ProgrammaticMcpServerOptions.McpSessionIdHeaderName].FirstOrDefault();
-        if (!string.IsNullOrWhiteSpace(sessionIdentity))
-        {
-            return ValueTask.CompletedTask;
-        }
-
         if (options.EnableSignedHeaderCallerBinding
             && httpContext.Request.Headers.TryGetValue(options.SignedHeaderName, out var headerValues)
             && !string.IsNullOrWhiteSpace(headerValues.FirstOrDefault()))
@@ -649,23 +652,24 @@ internal sealed class ProgrammaticCallerBindingResolver(
 
         if (httpContext.Request.Cookies.TryGetValue(options.CookieName, out var existingCookie))
         {
-            var existing = Unprotect(existingCookie, _cookieProtector);
+            var existing = Unprotect(existingCookie, _cookieProtector, CookiePurpose);
             if (existing is not null && existing.ExpiresAtUtc > DateTimeOffset.UtcNow && RouteMatches(existing))
             {
                 return ValueTask.CompletedTask;
             }
         }
 
-        IssueCookie(httpContext, CreateToken("caller-" + Guid.NewGuid().ToString("N"), options.CookieLifetime));
+        IssueCookie(httpContext, CreateToken("caller-" + Guid.NewGuid().ToString("N"), options.CookieLifetime, CookiePurpose));
         return ValueTask.CompletedTask;
     }
 
-    private ProtectedCallerBindingToken CreateToken(string callerBindingId, TimeSpan lifetime)
+    private ProtectedCallerBindingToken CreateToken(string callerBindingId, TimeSpan lifetime, string purpose)
     {
         return new ProtectedCallerBindingToken(
             callerBindingId,
             DateTimeOffset.UtcNow,
             DateTimeOffset.UtcNow.Add(lifetime),
+            purpose,
             options.RoutePrefix,
             Guid.NewGuid().ToString("N"));
     }
@@ -725,12 +729,18 @@ internal sealed class ProgrammaticCallerBindingResolver(
     private bool RouteMatches(ProtectedCallerBindingToken token)
         => string.Equals(token.RoutePrefix, options.RoutePrefix, StringComparison.Ordinal);
 
-    private static ProtectedCallerBindingToken? Unprotect(string value, IDataProtector protector)
+    private static string? GetTrustedSessionIdentity(MessageContext context)
+    {
+        return context.JsonRpcMessage.Context?.RelatedTransport?.SessionId;
+    }
+
+    private static ProtectedCallerBindingToken? Unprotect(string value, IDataProtector protector, string expectedPurpose)
     {
         try
         {
             var json = protector.Unprotect(value);
-            return JsonSerializer.Deserialize<ProtectedCallerBindingToken>(json);
+            var token = JsonSerializer.Deserialize<ProtectedCallerBindingToken>(json);
+            return token is not null && string.Equals(token.Purpose, expectedPurpose, StringComparison.Ordinal) ? token : null;
         }
         catch
         {
@@ -745,6 +755,7 @@ internal sealed record ProtectedCallerBindingToken(
     string CallerBindingId,
     DateTimeOffset IssuedAtUtc,
     DateTimeOffset ExpiresAtUtc,
+    string Purpose,
     string RoutePrefix,
     string TokenId);
 
@@ -855,7 +866,18 @@ internal static class ProgrammaticInstructionsBuilder
     {
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"Programmatic MCP flow: initialize -> tools/list -> capabilities.search -> code.execute -> artifact.read when needed -> mutation.list/apply/cancel for writes. Types: GET {routeState.TypeEndpointPath}. Mutations require stable caller binding via {(options.EnableSignedHeaderCallerBinding ? "cookie or signed header" : "cookie")}. conversationId must match ^[A-Za-z0-9._:-]{{1,128}}$. code.execute is synchronous request/response in v0. Limits: timeoutMs={options.ExecutorOptions.TimeoutMs}, maxApiCalls={options.ExecutorOptions.MaxApiCalls}, maxResultBytes={options.ExecutorOptions.MaxResultBytes}, maxStatements={options.ExecutorOptions.MaxStatements}, memoryBytes={options.ExecutorOptions.MemoryBytes}, maxCodeBytes={options.ExecutorOptions.MaxCodeBytes}, maxArgsBytes={options.ExecutorOptions.MaxArgsBytes}, maxConsoleLines={options.ExecutorOptions.MaxConsoleLines}, maxConsoleBytes={options.ExecutorOptions.MaxConsoleBytes}.");
+            $"Programmatic MCP flow: initialize -> tools/list -> capabilities.search -> code.execute -> artifact.read when needed -> mutation.list/apply/cancel for writes. Types: GET {routeState.TypeEndpointPath}. Mutations require stable caller binding via {DescribeCallerBinding(options)}. conversationId must match ^[A-Za-z0-9._:-]{{1,128}}$. code.execute is synchronous request/response in v0. Limits: timeoutMs={options.ExecutorOptions.TimeoutMs}, maxApiCalls={options.ExecutorOptions.MaxApiCalls}, maxResultBytes={options.ExecutorOptions.MaxResultBytes}, maxStatements={options.ExecutorOptions.MaxStatements}, memoryBytes={options.ExecutorOptions.MemoryBytes}, maxCodeBytes={options.ExecutorOptions.MaxCodeBytes}, maxArgsBytes={options.ExecutorOptions.MaxArgsBytes}, maxConsoleLines={options.ExecutorOptions.MaxConsoleLines}, maxConsoleBytes={options.ExecutorOptions.MaxConsoleBytes}.");
+    }
+
+    private static string DescribeCallerBinding(ProgrammaticMcpServerOptions options)
+    {
+        return (options.EnableCookieCallerBinding, options.EnableSignedHeaderCallerBinding) switch
+        {
+            (true, true) => "principal or MCP session identity, with built-in HTTP fallback via cookie or signed header",
+            (true, false) => "principal or MCP session identity, with built-in HTTP fallback via cookie",
+            (false, true) => "principal or MCP session identity, with built-in HTTP fallback via signed header",
+            (false, false) => "principal or MCP session identity; no built-in HTTP fallback is enabled"
+        };
     }
 }
 
@@ -911,7 +933,13 @@ internal sealed class ProgrammaticMcpLifecycleService(
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         shutdownCoordinator.BeginShutdown();
-        await shutdownCoordinator.WaitForDrainAsync(options.GracefulShutdownTimeout, cancellationToken);
+        var drained = await shutdownCoordinator.WaitForDrainAsync(options.GracefulShutdownTimeout, cancellationToken);
+        if (!drained)
+        {
+            logger.LogWarning("Graceful shutdown timeout elapsed; cancelling remaining in-flight work.");
+            shutdownCoordinator.ForceCancelRemainingWork();
+        }
+
         await base.StopAsync(cancellationToken);
     }
 
@@ -1095,6 +1123,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
 
         using var throttleLease = throttleDecision.Lease;
         using var executionScope = context.Services?.CreateScope();
+        using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, shutdownCoordinator.ForcedCancellationToken);
         var request = new CodeExecutionRequest(
             conversationId,
             code,
@@ -1112,7 +1141,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
 
         try
         {
-            var response = await executionService.ExecuteAsync(request, cancellationToken);
+            var response = await executionService.ExecuteAsync(request, executionCancellation.Token);
             logger.LogInformation(
                 "Programmatic code execution finished. ConversationId={ConversationId} ApiCalls={ApiCalls} Diagnostics={DiagnosticCount}",
                 conversationId,
@@ -1120,7 +1149,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
                 response.Diagnostics.Count);
             return CreateSuccess(response);
         }
-        catch (ArgumentOutOfRangeException exception)
+        catch (ArgumentException exception)
         {
             return CreateToolError("invalid_params", exception.Message);
         }
@@ -1324,14 +1353,20 @@ internal sealed class ProgrammaticMcpToolHandlers(
         }
 
         var capability = catalog.Capabilities.Single(item => item.IsMutation && item.MutationApplyHandler is not null && item.ApiPath == transition.Approval!.MutationName);
-        var writer = new TransportArtifactWriter(artifactStore, conversationId, binding.CallerBindingId, options.ExecutorOptions.ArtifactRetention.ArtifactTtlSeconds);
+        var writer = new TransportArtifactWriter(
+            artifactStore,
+            conversationId,
+            binding.CallerBindingId,
+            options.ExecutorOptions.ArtifactRetention.ArtifactTtlSeconds,
+            options.ExecutorOptions.ArtifactRetention.ArtifactChunkBytes);
         using var applyScope = context.Services?.CreateScope();
+        using var applyCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, shutdownCoordinator.ForcedCancellationToken);
         var mutationContext = new ProgrammaticMutationContext(
             conversationId,
             binding.CallerBindingId,
             approvalId,
             applyScope?.ServiceProvider ?? context.Services!,
-            cancellationToken,
+            applyCancellation.Token,
             writer);
 
         try
@@ -1349,7 +1384,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
                     approvalId,
                     ApprovalState.Applying,
                     current => current with { State = ApprovalState.Completed, ApplyingSinceUtc = null },
-                    cancellationToken);
+                    CancellationToken.None);
 
                 var artifacts = writer.Descriptors.ToArray();
                 return CreateSuccess(
@@ -1374,7 +1409,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
                     approvalId,
                     ApprovalState.Applying,
                     current => current with { State = ApprovalState.Pending, ApplyingSinceUtc = null, FailureCode = failureCode },
-                    cancellationToken);
+                    CancellationToken.None);
             }
             else
             {
@@ -1382,7 +1417,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
                     approvalId,
                     ApprovalState.Applying,
                     current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = failureCode },
-                    cancellationToken);
+                    CancellationToken.None);
             }
 
             return CreateSuccess(
@@ -1399,14 +1434,37 @@ internal sealed class ProgrammaticMcpToolHandlers(
                     applyResult.FailureKind == MutationApplyFailureKind.Retryable,
                     applyResult.Message));
         }
-        catch (Exception exception)
+        catch (JsonSchemaValidationException exception)
         {
-            logger.LogError(exception, "Mutation apply failed unexpectedly for approval {ApprovalId}.", approvalId);
+            logger.LogWarning(exception, "Mutation apply result validation failed for approval {ApprovalId}.", approvalId);
+            await approvalStore.TryTransitionAsync(
+                approvalId,
+                ApprovalState.Applying,
+                current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "validation_failed" },
+                CancellationToken.None);
+
+            return CreateSuccess(
+                new MutationApplyResponse(
+                    1,
+                    catalog.CapabilityVersion,
+                    "failed",
+                    approvalId,
+                    transition.Approval.ActionArgsHash,
+                    null,
+                    Array.Empty<ExecutionArtifactDescriptor>(),
+                    null,
+                    "validation_failed",
+                    false,
+                    exception.Message));
+        }
+        catch (OperationCanceledException) when (applyCancellation.IsCancellationRequested)
+        {
+            logger.LogWarning("Mutation apply was cancelled during shutdown for approval {ApprovalId}.", approvalId);
             await approvalStore.TryTransitionAsync(
                 approvalId,
                 ApprovalState.Applying,
                 current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "apply_outcome_unknown" },
-                cancellationToken);
+                CancellationToken.None);
 
             return CreateSuccess(
                 new MutationApplyResponse(
@@ -1421,6 +1479,29 @@ internal sealed class ProgrammaticMcpToolHandlers(
                     "apply_outcome_unknown",
                     false,
                     "The mutation apply outcome is unknown."));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError(exception, "Mutation apply failed unexpectedly for approval {ApprovalId}.", approvalId);
+            await approvalStore.TryTransitionAsync(
+                approvalId,
+                ApprovalState.Applying,
+                current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "apply_handler_error" },
+                CancellationToken.None);
+
+            return CreateSuccess(
+                new MutationApplyResponse(
+                    1,
+                    catalog.CapabilityVersion,
+                    "failed",
+                    approvalId,
+                    transition.Approval.ActionArgsHash,
+                    null,
+                    Array.Empty<ExecutionArtifactDescriptor>(),
+                    null,
+                    "apply_handler_error",
+                    false,
+                    "The mutation apply handler failed."));
         }
     }
 
@@ -1624,7 +1705,12 @@ internal sealed class ProgrammaticMcpToolHandlers(
 
     private sealed record ApprovalCursor(string SnapshotId, int Offset);
 
-    private sealed class TransportArtifactWriter(IArtifactStore artifactStore, string conversationId, string callerBindingId, int artifactTtlSeconds) : IArtifactWriter
+    private sealed class TransportArtifactWriter(
+        IArtifactStore artifactStore,
+        string conversationId,
+        string callerBindingId,
+        int artifactTtlSeconds,
+        int artifactChunkBytes) : IArtifactWriter
     {
         private readonly List<ExecutionArtifactDescriptor> _descriptors = [];
 
@@ -1658,7 +1744,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
                 cancellationToken);
 
             var totalBytes = Encoding.UTF8.GetByteCount(content);
-            var totalChunks = Math.Max(1, (int)Math.Ceiling((double)totalBytes / Math.Max(1, 65_536)));
+            var totalChunks = Math.Max(1, (int)Math.Ceiling((double)totalBytes / Math.Max(1, artifactChunkBytes)));
             var descriptor = new ExecutionArtifactDescriptor(artifactId, kind, name, mimeType, totalBytes, totalChunks, expiresAt.ToString("O"));
             _descriptors.Add(descriptor);
             return descriptor;

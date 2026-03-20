@@ -112,6 +112,25 @@ public sealed class CoreContractsTests
     }
 
     [Fact]
+    public void SchemaGenerationResolvesDefinitionNameCollisionsDeterministically()
+    {
+        var generator = new BuiltInSchemaGenerator();
+
+        var schema = generator.Generate(typeof(CollidingDefinitionContainer));
+        var definitions = schema["$defs"]!.AsObject();
+
+        Assert.True(definitions.ContainsKey("Node"));
+        Assert.True(definitions.ContainsKey("Node2"));
+        Assert.NotEqual(
+            CanonicalJson.Serialize(definitions["Node"]),
+            CanonicalJson.Serialize(definitions["Node2"]));
+        Assert.Equal("#/$defs/Node", schema["properties"]!["left1"]!["$ref"]!.GetValue<string>());
+        Assert.Equal("#/$defs/Node", schema["properties"]!["left2"]!["$ref"]!.GetValue<string>());
+        Assert.Equal("#/$defs/Node2", schema["properties"]!["right1"]!["$ref"]!.GetValue<string>());
+        Assert.Equal("#/$defs/Node2", schema["properties"]!["right2"]!["$ref"]!.GetValue<string>());
+    }
+
+    [Fact]
     public void UnsupportedAutomaticSchemaCasesRequireOverride()
     {
         var generator = new BuiltInSchemaGenerator();
@@ -293,6 +312,8 @@ public sealed class CoreContractsTests
         Assert.Equal("0.000001", CanonicalJson.NormalizeNumber("0.000001"));
         Assert.Equal("333333333.3333333", CanonicalJson.NormalizeNumber("333333333.33333329"));
         Assert.Equal("1e-27", CanonicalJson.NormalizeNumber("0.000000000000000000000000001"));
+        Assert.Equal("9007199254740992", CanonicalJson.NormalizeNumber("9007199254740993"));
+        Assert.Equal("-9007199254740992", CanonicalJson.NormalizeNumber("-9007199254740993"));
     }
 
     [Fact]
@@ -562,6 +583,24 @@ public sealed class CoreContractsTests
     public sealed record RepeatedNode(string Name, RepeatedLeaf Leaf);
 
     public sealed record RepeatedLeaf(int Count);
+
+    public sealed record CollidingDefinitionContainer(
+        OuterAlpha.Node Left1,
+        OuterAlpha.Node Left2,
+        OuterBeta.Node Right1,
+        OuterBeta.Node Right2);
+
+    public static class OuterAlpha
+    {
+        public sealed record Node(string Name, SharedLeaf Leaf);
+    }
+
+    public static class OuterBeta
+    {
+        public sealed record Node(int Count, SharedLeaf Leaf);
+    }
+
+    public sealed record SharedLeaf(string Value);
 
     public sealed record UnsupportedFixture(JsonElement Raw);
 }

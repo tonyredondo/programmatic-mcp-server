@@ -15,9 +15,10 @@ In this repository, "programmatic MCP" means:
 
 ## Source Of Truth
 
-- The shipped code, tests, and public documentation in this repository are the source of truth for current behavior.
-- Do not invent behavior that is not supported by those contracts and docs when implementing the library.
-- If implementation work changes public behavior, update the code, tests, and docs together in the same change.
+- `INITIAL_PLAN.md` remains the source of truth for v0 scope, contracts, defaults, and constraints.
+- The shipped code, tests, and public documentation should reflect the implemented behavior and stay aligned with that plan.
+- Do not invent behavior that is not supported by the plan and the implemented contracts.
+- If implementation work changes public behavior, update the code, tests, docs, and the plan together in the same change.
 
 ## Working Rules
 

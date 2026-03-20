@@ -34,7 +34,7 @@ public static class SampleServerHosting
             {
                 options.ServerName = "ProgrammaticMcp.SampleServer";
                 options.ServerVersion = "0.1.0";
-                options.AllowInsecureDevelopmentCookies = builder.Environment.IsDevelopment();
+                options.AllowInsecureDevelopmentCookies = ShouldAllowInsecureDevelopmentCookies(builder);
                 options.EnableSignedHeaderCallerBinding = true;
                 options.Builder.AllowAllBoundCallers();
                 options.ConfigureCatalog(RegisterCatalog);
@@ -78,6 +78,34 @@ public static class SampleServerHosting
             {
                 AllowCachingResponses = false
             });
+    }
+
+    private static bool ShouldAllowInsecureDevelopmentCookies(WebApplicationBuilder builder)
+    {
+        if (!builder.Environment.IsDevelopment())
+        {
+            return false;
+        }
+
+        var configuredUrls = builder.Configuration["ASPNETCORE_URLS"] ?? builder.Configuration["urls"];
+        if (string.IsNullOrWhiteSpace(configuredUrls))
+        {
+            return true;
+        }
+
+        return configuredUrls
+            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .All(IsLoopbackUrl);
+    }
+
+    private static bool IsLoopbackUrl(string candidate)
+    {
+        if (!Uri.TryCreate(candidate, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        return uri.IsLoopback || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void RegisterCatalog(ProgrammaticMcpBuilder catalog)
