@@ -186,6 +186,47 @@ public sealed class JintCodeExecutorTests
     }
 
     [Fact]
+    public async Task ClientSampleRejectsInvalidBridgeRequestsBeforeSamplingStarts()
+    {
+        var fixture = CreateFixture();
+        using var services = new SamplingServiceProvider(publicClient: new FakeSamplingClient());
+
+        var nonObjectRequest = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    try {
+                        return await programmatic.client.sample("hello");
+                    } catch (error) {
+                        return error.code;
+                    }
+                }
+                """,
+                VisibleApiPaths: Array.Empty<string>(),
+                Services: services));
+
+        Assert.Equal("invalid_params", nonObjectRequest.Result?.GetValue<string>());
+
+        var invalidRequest = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    try {
+                        return await programmatic.client.sample({ messages: [] });
+                    } catch (error) {
+                        return error.code;
+                    }
+                }
+                """,
+                VisibleApiPaths: Array.Empty<string>(),
+                Services: services));
+
+        Assert.Equal("invalid_params", invalidRequest.Result?.GetValue<string>());
+    }
+
+    [Fact]
     public async Task ClientSampleUsesTheStructuredPathForToolEnabledRequests()
     {
         var fixture = CreateFixture();

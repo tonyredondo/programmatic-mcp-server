@@ -192,6 +192,59 @@ public sealed class CoreContractsTests
         Assert.Contains("root schema of type 'object'", Assert.Throws<InvalidOperationException>(() => scalarSchemaBuilder.BuildCatalog()).Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void CapabilitySearchExcludesResourcesAndSamplingToolsWhileThoseSurfacesRemainIndependentlyAvailable()
+    {
+        var builder = CreateBuilderWithOptionalSamplingTools(includeSamplingTools: true)
+            .AddResource(
+                "sample://docs/guide",
+                resource => resource
+                    .WithName("Guide")
+                    .WithDescription("A guide.")
+                    .WithMimeType("text/markdown")
+                    .WithText("# Guide"));
+
+        var catalog = builder.BuildCatalog();
+        var samplingRegistry = builder.BuildSamplingToolRegistry();
+        var search = catalog.Search(new CapabilitySearchRequest(DetailLevel: CapabilityDetailLevel.Names, Limit: 20));
+        var apiPaths = search.Items.Select(static item => item.ApiPath).ToArray();
+
+        Assert.Equal(
+            new[]
+            {
+                "projects.getById",
+                "projects.list",
+                "tasks.complete"
+            },
+            apiPaths);
+        Assert.DoesNotContain("clock.read", apiPaths, StringComparer.Ordinal);
+        Assert.Single(catalog.Resources);
+        Assert.Equal("sample://docs/guide", catalog.Resources[0].Uri);
+        Assert.Single(samplingRegistry.Tools);
+        Assert.Equal("clock.read", samplingRegistry.Tools[0].Name);
+    }
+
+    [Fact]
+    public void SamplingRequestValidationRejectsInvalidShapes()
+    {
+        Assert.Throws<ArgumentException>(
+            () => BuilderValidation.ValidateSamplingRequest(new ProgrammaticSamplingRequest(null, Array.Empty<ProgrammaticSamplingMessage>())));
+        Assert.Throws<ArgumentException>(
+            () => BuilderValidation.ValidateSamplingRequest(new ProgrammaticSamplingRequest("   ", Array.Empty<ProgrammaticSamplingMessage>())));
+        Assert.Throws<ArgumentException>(
+            () => BuilderValidation.ValidateSamplingRequest(new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("system", "Hello")])));
+        Assert.Throws<ArgumentException>(
+            () => BuilderValidation.ValidateSamplingRequest(new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "   ")])));
+        Assert.Throws<ArgumentException>(
+            () => BuilderValidation.ValidateSamplingRequest(new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "Hello")], MaxTokens: 0)));
+        Assert.Throws<ArgumentException>(
+            () => BuilderValidation.ValidateSamplingRequest(new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "Hello")], EnableTools: false, AllowedToolNames: ["clock.read"])));
+        Assert.Throws<ArgumentException>(
+            () => BuilderValidation.ValidateSamplingRequest(new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "Hello")], EnableTools: true, AllowedToolNames: Array.Empty<string>())));
+        Assert.Throws<ArgumentException>(
+            () => BuilderValidation.ValidateSamplingRequest(new ProgrammaticSamplingRequest(null, [new ProgrammaticSamplingMessage("user", "Hello")], EnableTools: true, AllowedToolNames: ["clock.read", "clock.read"])));
+    }
+
     private static ProgrammaticCatalogSnapshot CreateCatalogWithOptionalResources(bool includeResources)
     {
         var builder = CreateBuilderWithOptionalSamplingTools(includeSamplingTools: false);

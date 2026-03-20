@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
@@ -287,6 +288,98 @@ public sealed class ProgrammaticMcpSampleServerTests
     }
 
     [Fact]
+    public async Task SampleServerStatefulSdkPathAdvertisesTheFullSupportedSurface()
+    {
+        await using var factory = CreateFactory();
+        await using var client = await CreateSessionClientAsync(factory);
+
+        Assert.Contains("/mcp/types", client.ServerInstructions, StringComparison.Ordinal);
+        Assert.Contains("resources/list", client.ServerInstructions, StringComparison.Ordinal);
+        Assert.Contains("programmatic.client.sample(...)", client.ServerInstructions, StringComparison.Ordinal);
+        Assert.Contains("signed header", client.ServerInstructions, StringComparison.OrdinalIgnoreCase);
+
+        var tools = await client.ListToolsAsync();
+        Assert.Equal(
+            new[]
+            {
+                "artifact.read",
+                "capabilities.search",
+                "code.execute",
+                "mutation.apply",
+                "mutation.cancel",
+                "mutation.list"
+            },
+            tools.Select(tool => tool.ProtocolTool.Name).OrderBy(static name => name, StringComparer.Ordinal).ToArray());
+
+        var resources = await client.ListResourcesAsync();
+        Assert.Equal(
+            new[]
+            {
+                "sample://workspace/guide",
+                "sample://workspace/projects"
+            },
+            resources.Select(static resource => resource.Uri).OrderBy(static uri => uri, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public async Task SampleServerJsSamplingEnforcesExplicitReadOnlyScopeRules()
+    {
+        await using var factory = CreateFactory();
+        await using var client = await CreateSessionClientAsync(
+            factory,
+            CreateSamplingClientOptions(
+                _ => ValueTask.FromResult(
+                    new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "sample-test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "unused" }]
+                    })));
+
+        var missingScope = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "sample-js-sampling-no-scope",
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_requires_explicit_read_only_scope", ExtractStringResult(missingScope));
+
+        var visibleMutation = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "sample-js-sampling-mutation-scope",
+                ["visibleApiPaths"] = new[] { "tasks.complete" },
+                ["code"] = """
+                           async function main() {
+                               try {
+                                   return await programmatic.client.sample({
+                                       messages: [{ role: "user", text: "Hello" }]
+                                   });
+                               } catch (error) {
+                                   return error.code;
+                               }
+                           }
+                           """
+            });
+
+        Assert.Equal("sampling_not_allowed_with_visible_mutations", ExtractStringResult(visibleMutation));
+    }
+
+    [Fact]
     public async Task SampleServerSupportsStatefulJsSamplingAndCapabilityHandlerSampling()
     {
         await using var factory = CreateFactory();
@@ -385,7 +478,15 @@ public sealed class ProgrammaticMcpSampleServerTests
     private static WebApplicationFactory<Program> CreateFactory()
     {
         return new WebApplicationFactory<Program>()
-            .WithWebHostBuilder(builder => builder.UseEnvironment("Development"));
+            .WithWebHostBuilder(
+                builder =>
+                {
+                    builder.UseEnvironment("Development");
+                    builder.ConfigureServices(
+                        services =>
+                            services.PostConfigure<ProgrammaticMcpServerOptions>(
+                                options => options.ExecutorOptions = options.ExecutorOptions with { MemoryBytes = 64 * 1024 * 1024 }));
+                });
     }
 
     private static async Task<McpClient> CreateSessionClientAsync(WebApplicationFactory<Program> factory, McpClientOptions? options = null)
