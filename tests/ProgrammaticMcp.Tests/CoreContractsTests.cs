@@ -113,6 +113,18 @@ public sealed class CoreContractsTests
     }
 
     [Fact]
+    public void SchemaGenerationAndValidationSupportRepeatedNestedObjectTypes()
+    {
+        var generator = new BuiltInSchemaGenerator();
+
+        var schema = generator.Generate(typeof(RepeatedContainer));
+        var payload = JsonNode.Parse("""{"primary":{"name":"a","leaf":{"count":1}},"secondary":{"name":"b","leaf":{"count":2}}}""");
+
+        Assert.Contains("\"$ref\"", schema.ToJsonString(), StringComparison.Ordinal);
+        JsonSchemaValidator.Validate(payload, schema);
+    }
+
+    [Fact]
     public void SchemaGenerationResolvesDefinitionNameCollisionsDeterministically()
     {
         var generator = new BuiltInSchemaGenerator();
@@ -129,6 +141,33 @@ public sealed class CoreContractsTests
         Assert.Equal("#/$defs/Node", schema["properties"]!["left2"]!["$ref"]!.GetValue<string>());
         Assert.Equal("#/$defs/Node2", schema["properties"]!["right1"]!["$ref"]!.GetValue<string>());
         Assert.Equal("#/$defs/Node2", schema["properties"]!["right2"]!["$ref"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void SchemaGenerationTreatsDictionaryStringValuesAsObjectMaps()
+    {
+        var generator = new BuiltInSchemaGenerator();
+
+        var schema = generator.Generate(typeof(DictionaryContainer));
+        var valuesSchema = schema["properties"]!["values"]!.AsObject();
+
+        Assert.Equal("object", valuesSchema["type"]!.GetValue<string>());
+        Assert.False(valuesSchema.ContainsKey("items"));
+        Assert.Equal("integer", valuesSchema["additionalProperties"]!["type"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void SchemaGenerationOmitsJsonIgnoredProperties()
+    {
+        var generator = new BuiltInSchemaGenerator();
+
+        var schema = generator.Generate(typeof(JsonIgnoreFixture));
+        var properties = schema["properties"]!.AsObject();
+
+        Assert.True(properties.ContainsKey("visible"));
+        Assert.False(properties.ContainsKey("hidden"));
+        Assert.DoesNotContain("hidden", schema["required"]!.AsArray().Select(static item => item!.GetValue<string>()));
+        Assert.DoesNotContain("hidden", schema.ToJsonString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -331,10 +370,20 @@ public sealed class CoreContractsTests
         Assert.Equal("1.23", CanonicalJson.NormalizeNumber("1.2300"));
         Assert.Equal("1000", CanonicalJson.NormalizeNumber("1e+3"));
         Assert.Equal("0.000001", CanonicalJson.NormalizeNumber("0.000001"));
-        Assert.Equal("333333333.3333333", CanonicalJson.NormalizeNumber("333333333.33333329"));
+        Assert.Equal("333333333.33333329", CanonicalJson.NormalizeNumber("333333333.33333329"));
         Assert.Equal("1e-27", CanonicalJson.NormalizeNumber("0.000000000000000000000000001"));
-        Assert.Equal("9007199254740992", CanonicalJson.NormalizeNumber("9007199254740993"));
-        Assert.Equal("-9007199254740992", CanonicalJson.NormalizeNumber("-9007199254740993"));
+        Assert.Equal("9007199254740993", CanonicalJson.NormalizeNumber("9007199254740993"));
+        Assert.Equal("-9007199254740993", CanonicalJson.NormalizeNumber("-9007199254740993"));
+    }
+
+    [Fact]
+    public void CanonicalJsonPreservesDistinctLargeIntegers()
+    {
+        var first = JsonNode.Parse("9007199254740992");
+        var second = JsonNode.Parse("9007199254740993");
+
+        Assert.NotEqual(CanonicalJson.Serialize(first), CanonicalJson.Serialize(second));
+        Assert.NotEqual(CanonicalJson.Sha256(first), CanonicalJson.Sha256(second));
     }
 
     [Fact]
@@ -605,9 +654,13 @@ public sealed class CoreContractsTests
 
     public sealed record RepeatedLeaf(int Count);
 
+    public sealed record DictionaryContainer(Dictionary<string, int> Values);
+
     public sealed record AliasedPropertyInput([property: JsonPropertyName("task-id")] string TaskId);
 
     public sealed record AliasedPropertyResult([property: JsonPropertyName("status-code")] string StatusCode);
+
+    public sealed record JsonIgnoreFixture(string Visible, [property: JsonIgnore] string Hidden);
 
     public sealed record CollidingDefinitionContainer(
         OuterAlpha.Node Left1,

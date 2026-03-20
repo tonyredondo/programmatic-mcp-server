@@ -45,15 +45,15 @@ public sealed class BuiltInSchemaGenerator
             throw new UnsupportedSchemaTypeException(type, "explicit schema override is required");
         }
 
-        if (TryGetCollectionElementType(type, out var elementType))
-        {
-            VisitForCounts(elementType!, counts, visiting);
-            return;
-        }
-
         if (TryGetDictionaryValueType(type, out var valueType))
         {
             VisitForCounts(valueType!, counts, visiting);
+            return;
+        }
+
+        if (TryGetCollectionElementType(type, out var elementType))
+        {
+            VisitForCounts(elementType!, counts, visiting);
             return;
         }
 
@@ -113,21 +113,21 @@ public sealed class BuiltInSchemaGenerator
             return primitive;
         }
 
-        if (TryGetCollectionElementType(effectiveType, out var elementType))
-        {
-            return new JsonObject
-            {
-                ["type"] = "array",
-                ["items"] = GenerateSchema(elementType!, false, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions)
-            };
-        }
-
         if (TryGetDictionaryValueType(effectiveType, out var valueType))
         {
             return new JsonObject
             {
                 ["type"] = "object",
                 ["additionalProperties"] = GenerateSchema(valueType!, false, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions)
+            };
+        }
+
+        if (TryGetCollectionElementType(effectiveType, out var elementType))
+        {
+            return new JsonObject
+            {
+                ["type"] = "array",
+                ["items"] = GenerateSchema(elementType!, false, objectCounts, assignedDefinitionNames, assignedDefinitionTypes, definitions)
             };
         }
 
@@ -269,6 +269,12 @@ public sealed class BuiltInSchemaGenerator
         foreach (var property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance).OrderBy(static property => property.Name, StringComparer.Ordinal))
         {
             if (!property.CanRead || property.GetIndexParameters().Length != 0)
+            {
+                continue;
+            }
+
+            var ignore = property.GetCustomAttribute<JsonIgnoreAttribute>();
+            if (ignore is not null && ignore.Condition != JsonIgnoreCondition.Never)
             {
                 continue;
             }

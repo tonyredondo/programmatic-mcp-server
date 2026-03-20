@@ -26,16 +26,17 @@ public static class JsonSchemaValidator
     /// </summary>
     public static void Validate(JsonNode? value, JsonNode schema)
     {
-        ValidateNode(value, schema, "$");
+        ValidateNode(value, schema, schema, "$");
     }
 
-    private static void ValidateNode(JsonNode? value, JsonNode schema, string path)
+    private static void ValidateNode(JsonNode? value, JsonNode schema, JsonNode rootSchema, string path)
     {
         var schemaObject = schema.AsObject();
 
-        if (schemaObject.TryGetPropertyValue("$ref", out var referenceNode))
+        if (schemaObject.TryGetPropertyValue("$ref", out var referenceNode) && referenceNode is JsonValue referenceValue)
         {
-            throw new JsonSchemaValidationException($"References are not supported by this validator at {path}: {referenceNode}.");
+            ValidateNode(value, ResolveReference(referenceValue.GetValue<string>(), rootSchema), rootSchema, path);
+            return;
         }
 
         var declaredTypes = ReadTypes(schemaObject);
@@ -67,7 +68,7 @@ public static class JsonSchemaValidator
             {
                 if (properties[property.Key] is JsonNode propertySchema)
                 {
-                    ValidateNode(property.Value, propertySchema, $"{path}.{property.Key}");
+                    ValidateNode(property.Value, propertySchema, rootSchema, $"{path}.{property.Key}");
                     continue;
                 }
 
@@ -80,7 +81,7 @@ public static class JsonSchemaValidator
 
                     if (additionalSchema is not JsonValue)
                     {
-                        ValidateNode(property.Value, additionalSchema, $"{path}.{property.Key}");
+                        ValidateNode(property.Value, additionalSchema, rootSchema, $"{path}.{property.Key}");
                     }
                 }
                 else
@@ -98,7 +99,7 @@ public static class JsonSchemaValidator
             var itemsSchema = schemaObject["items"] ?? throw new JsonSchemaValidationException($"Missing array items schema at {path}.");
             for (var index = 0; index < jsonArray.Count; index++)
             {
-                ValidateNode(jsonArray[index], itemsSchema, $"{path}[{index}]");
+                ValidateNode(jsonArray[index], itemsSchema, rootSchema, $"{path}[{index}]");
             }
 
             return;
@@ -121,6 +122,27 @@ public static class JsonSchemaValidator
         }
 
         throw new JsonSchemaValidationException($"Unsupported JSON shape at {path}.");
+    }
+
+    private static JsonNode ResolveReference(string reference, JsonNode rootSchema)
+    {
+        if (!reference.StartsWith("#/", StringComparison.Ordinal))
+        {
+            throw new JsonSchemaValidationException($"Unsupported schema reference '{reference}'.");
+        }
+
+        JsonNode? current = rootSchema;
+        foreach (var segment in reference[2..].Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var decodedSegment = segment.Replace("~1", "/", StringComparison.Ordinal).Replace("~0", "~", StringComparison.Ordinal);
+            current = current?[decodedSegment];
+            if (current is null)
+            {
+                throw new JsonSchemaValidationException($"Schema reference '{reference}' could not be resolved.");
+            }
+        }
+
+        return current;
     }
 
     private static HashSet<string> ReadTypes(JsonObject schema)

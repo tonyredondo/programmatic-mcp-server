@@ -2,9 +2,9 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Encodings.Web;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace ProgrammaticMcp;
 
@@ -13,6 +13,10 @@ namespace ProgrammaticMcp;
 /// </summary>
 public static class CanonicalJson
 {
+    private static readonly Regex JsonNumberExpression = new(
+        "^(?<sign>-)?(?<int>0|[1-9]\\d*)(?:\\.(?<frac>\\d+))?(?:[eE](?<exp>[+-]?\\d+))?$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     /// <summary>
     /// Serializes a JSON node into canonical JSON text.
     /// </summary>
@@ -69,91 +73,69 @@ public static class CanonicalJson
     /// </summary>
     public static string NormalizeNumber(string raw)
     {
-        if (!double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+        var match = JsonNumberExpression.Match(raw);
+        if (!match.Success)
         {
             throw new InvalidOperationException($"'{raw}' is not a valid JSON number.");
         }
 
-        if (double.IsNaN(value) || double.IsInfinity(value))
-        {
-            throw new InvalidOperationException($"'{raw}' is not a valid finite JSON number.");
-        }
+        var sign = match.Groups["sign"].Value;
+        var integerDigits = match.Groups["int"].Value;
+        var fractionalDigits = match.Groups["frac"].Success ? match.Groups["frac"].Value : string.Empty;
+        var exponent = match.Groups["exp"].Success
+            ? int.Parse(match.Groups["exp"].Value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture)
+            : 0;
 
-        if (value == 0d)
+        var digits = integerDigits + fractionalDigits;
+        var exponentBase10 = exponent - fractionalDigits.Length;
+
+        var firstNonZero = digits.AsSpan().IndexOfAnyExcept('0');
+        if (firstNonZero < 0)
         {
             return "0";
         }
 
-        var text = SerializeDouble(value).Replace("E", "e", StringComparison.Ordinal);
-        return NormalizeEcmaNumberText(text);
-    }
-    private static string SerializeDouble(double value)
-    {
-        using var buffer = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(
-                   buffer,
-                   new JsonWriterOptions
-                   {
-                       Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-                       SkipValidation = false
-                   }))
+        digits = digits[firstNonZero..];
+        var trailingZeroCount = CountTrailingZeros(digits);
+        if (trailingZeroCount > 0)
         {
-            writer.WriteNumberValue(value);
+            digits = digits[..^trailingZeroCount];
+            exponentBase10 += trailingZeroCount;
         }
 
-        return Encoding.UTF8.GetString(buffer.ToArray());
+        var scientificExponent = exponentBase10 + digits.Length - 1;
+        var normalized = scientificExponent is >= -6 and < 21
+            ? ExpandToDecimal(digits, exponentBase10)
+            : $"{digits[0]}{(digits.Length > 1 ? "." + digits[1..] : string.Empty)}e{scientificExponent.ToString(CultureInfo.InvariantCulture)}";
+
+        return sign.Length == 0 ? normalized : "-" + normalized;
     }
 
-    private static string NormalizeEcmaNumberText(string text)
+    private static int CountTrailingZeros(string digits)
     {
-        if (!text.Contains('e'))
+        var count = 0;
+        for (var index = digits.Length - 1; index >= 0 && digits[index] == '0'; index--)
         {
-            return TrimDecimal(text);
+            count++;
         }
 
-        var pieces = text.Split('e');
-        var mantissa = TrimDecimal(pieces[0]);
-        var exponent = int.Parse(pieces[1], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
-
-        if (exponent is >= -6 and < 21)
-        {
-            return ExpandExponent(mantissa, exponent);
-        }
-
-        return $"{mantissa}e{exponent.ToString(CultureInfo.InvariantCulture)}";
+        return count;
     }
 
-    private static string ExpandExponent(string mantissa, int exponent)
+    private static string ExpandToDecimal(string digits, int exponentBase10)
     {
-        var sign = mantissa.StartsWith("-", StringComparison.Ordinal) ? "-" : string.Empty;
-        var unsignedMantissa = sign.Length == 0 ? mantissa : mantissa[1..];
-        var decimalIndex = unsignedMantissa.IndexOf('.');
-        var digits = unsignedMantissa.Replace(".", string.Empty, StringComparison.Ordinal);
-        var digitsBeforeDecimal = decimalIndex >= 0 ? decimalIndex : unsignedMantissa.Length;
-        var newDecimalIndex = digitsBeforeDecimal + exponent;
-
-        if (newDecimalIndex <= 0)
+        if (exponentBase10 >= 0)
         {
-            return sign + TrimDecimal($"0.{new string('0', -newDecimalIndex)}{digits}");
+            return digits + new string('0', exponentBase10);
         }
 
-        if (newDecimalIndex >= digits.Length)
+        var decimalIndex = digits.Length + exponentBase10;
+        if (decimalIndex > 0)
         {
-            return sign + digits + new string('0', newDecimalIndex - digits.Length);
+            return $"{digits[..decimalIndex]}.{digits[decimalIndex..]}";
         }
 
-        return sign + TrimDecimal($"{digits[..newDecimalIndex]}.{digits[newDecimalIndex..]}");
-    }
-
-    private static string TrimDecimal(string value)
-    {
-        if (!value.Contains('.'))
-        {
-            return value;
-        }
-
-        value = value.TrimEnd('0');
-        return value.EndsWith(".", StringComparison.Ordinal) ? value[..^1] : value;
+        return $"0.{new string('0', -decimalIndex)}{digits}";
     }
 }
 
