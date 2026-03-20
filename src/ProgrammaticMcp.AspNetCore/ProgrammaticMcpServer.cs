@@ -646,12 +646,6 @@ internal sealed class ProgrammaticCallerBindingResolver(
             return ValueTask.CompletedTask;
         }
 
-        var sessionIdentity = httpContext.Request.Headers[ProgrammaticMcpServerOptions.McpSessionIdHeaderName].FirstOrDefault();
-        if (!string.IsNullOrWhiteSpace(sessionIdentity))
-        {
-            return ValueTask.CompletedTask;
-        }
-
         if (options.EnableSignedHeaderCallerBinding
             && httpContext.Request.Headers.TryGetValue(options.SignedHeaderName, out var headerValues)
             && !string.IsNullOrWhiteSpace(headerValues.FirstOrDefault()))
@@ -693,7 +687,7 @@ internal sealed class ProgrammaticCallerBindingResolver(
             {
                 HttpOnly = true,
                 SameSite = SameSiteMode.Lax,
-                Secure = !options.AllowInsecureDevelopmentCookies,
+                Secure = !(options.AllowInsecureDevelopmentCookies && IsLoopbackHost(httpContext.Request.Host.Host)),
                 IsEssential = true,
                 Path = options.RoutePrefix == "/" ? "/" : options.RoutePrefix,
                 Expires = token.ExpiresAtUtc
@@ -733,6 +727,16 @@ internal sealed class ProgrammaticCallerBindingResolver(
         return string.Equals(uri.Scheme, httpContext.Request.Scheme, StringComparison.OrdinalIgnoreCase)
             && string.Equals(uri.Host, httpContext.Request.Host.Host, StringComparison.OrdinalIgnoreCase)
             && uri.Port == (httpContext.Request.Host.Port ?? (string.Equals(httpContext.Request.Scheme, "https", StringComparison.OrdinalIgnoreCase) ? 443 : 80));
+    }
+
+    private static bool IsLoopbackHost(string host)
+    {
+        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address);
     }
 
     private bool RouteMatches(ProtectedCallerBindingToken token)

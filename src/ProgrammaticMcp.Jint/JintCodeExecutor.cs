@@ -363,7 +363,8 @@ public sealed class JintCodeExecutor : ICodeExecutor
         builder.AppendLine("    if (value === null) return 'null';");
         builder.AppendLine("    const kind = typeof value;");
         builder.AppendLine("    if (kind === 'string') return JSON.stringify(value);");
-        builder.AppendLine("    if (kind === 'number' || kind === 'boolean') return JSON.stringify(value);");
+        builder.AppendLine("    if (kind === 'number') return Number.isFinite(value) ? JSON.stringify(value) : String(value);");
+        builder.AppendLine("    if (kind === 'boolean') return JSON.stringify(value);");
         builder.AppendLine("    if (kind === 'undefined' || kind === 'bigint' || kind === 'symbol' || kind === 'function') {");
         builder.AppendLine("      try { return String(value); } catch { return '[Unserializable]'; }");
         builder.AppendLine("    }");

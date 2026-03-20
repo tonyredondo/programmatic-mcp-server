@@ -167,8 +167,24 @@ public static class TypeScriptDeclarationGenerator
             ?? new HashSet<string>(StringComparer.Ordinal);
         var members = properties
             .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
-            .Select(pair => $"{pair.Key}{(required.Contains(pair.Key) ? string.Empty : "?")}: {RenderTypeScript(pair.Value!, definitionAliases)}");
+            .Select(pair => $"{RenderPropertyName(pair.Key)}{(required.Contains(pair.Key) ? string.Empty : "?")}: {RenderTypeScript(pair.Value!, definitionAliases)}");
         return "{ " + string.Join("; ", members) + " }";
+    }
+
+    private static string RenderPropertyName(string propertyName)
+    {
+        if (string.IsNullOrEmpty(propertyName))
+        {
+            return JsonValue.Create(propertyName)!.ToJsonString();
+        }
+
+        if ((char.IsLetter(propertyName[0]) || propertyName[0] is '_' or '$')
+            && propertyName.Skip(1).All(static character => char.IsLetterOrDigit(character) || character is '_' or '$'))
+        {
+            return propertyName;
+        }
+
+        return JsonValue.Create(propertyName)!.ToJsonString();
     }
 }
 

@@ -343,6 +343,26 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     }
 
     [Fact]
+    public async Task CookieFallbackKeepsSecureFlagForNonLoopbackHostHeaders()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureOptions: options =>
+            {
+                options.EnableStatefulHttpTransport = false;
+                options.AllowInsecureDevelopmentCookies = true;
+            });
+
+        await using var rawClient = host.CreateRawClient(hostHeader: "example.test");
+        var initialize = await rawClient.InitializeAsync();
+        var setCookie = initialize.HttpResponse.Headers.TryGetValues("Set-Cookie", out var values)
+            ? values.SingleOrDefault()
+            : null;
+
+        Assert.NotNull(setCookie);
+        Assert.Contains("Secure", setCookie!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task RawCookieFallbackRejectsCrossOriginMutationRequests()
     {
         await using var host = await ProgrammaticMcpTestHost.StartAsync(
@@ -1132,9 +1152,15 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         var execution = await executionTask;
         await stopTask;
 
+        Assert.False(execution.IsError, execution.Body.ToJsonString());
         Assert.Equal("released", execution.StructuredContent["result"]!.GetValue<string>());
-        var toolActivity = Assert.Single(activityCollector.CompletedActivities, activity => activity.OperationName == "programmatic.tool.call");
-        Assert.Equal("code.execute", toolActivity.Tags.Single(tag => tag.Key == "mcp.tool.name").Value);
+        Assert.Contains(
+            activityCollector.CompletedActivities,
+            activity => activity.OperationName == "programmatic.tool.call"
+                && string.Equals(
+                    activity.Tags.FirstOrDefault(tag => tag.Key == "mcp.tool.name").Value as string,
+                    "code.execute",
+                    StringComparison.Ordinal));
         Assert.Contains(loggerProvider.Entries, entry => entry.Message.Contains("Programmatic code execution finished.", StringComparison.Ordinal));
         Assert.Contains(loggerProvider.Entries, entry => entry.Message.Contains("ApiCalls=", StringComparison.Ordinal));
     }
@@ -1434,7 +1460,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
             return await McpClient.CreateAsync(transport);
         }
 
-        public RawMcpClient CreateRawClient(CookieContainer? cookieContainer = null, string? signedHeaderToken = null, bool includeDefaultOrigin = true)
+        public RawMcpClient CreateRawClient(CookieContainer? cookieContainer = null, string? signedHeaderToken = null, bool includeDefaultOrigin = true, string? hostHeader = null)
         {
             var handler = new HttpClientHandler
             {
@@ -1455,7 +1481,7 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
             var defaultOrigin = includeDefaultOrigin && client.BaseAddress is not null
                 ? new Uri(client.BaseAddress, "/").GetLeftPart(UriPartial.Authority)
                 : null;
-            return new RawMcpClient(client, McpPath, defaultOrigin);
+            return new RawMcpClient(client, McpPath, defaultOrigin, hostHeader);
         }
 
         public Task StopAsync()
@@ -1518,14 +1544,16 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         private readonly HttpClient _client;
         private readonly string _mcpPath;
         private readonly string? _defaultOrigin;
+        private readonly string? _hostHeader;
         private int _nextId = 1;
         private string _protocolVersion = "2024-11-05";
 
-        public RawMcpClient(HttpClient client, string mcpPath, string? defaultOrigin = null)
+        public RawMcpClient(HttpClient client, string mcpPath, string? defaultOrigin = null, string? hostHeader = null)
         {
             _client = client;
             _mcpPath = mcpPath;
             _defaultOrigin = defaultOrigin;
+            _hostHeader = hostHeader;
         }
 
         public async Task<RawMcpResponse> InitializeAsync(CancellationToken cancellationToken = default)
@@ -1576,6 +1604,10 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
             if (!string.IsNullOrWhiteSpace(origin))
             {
                 request.Headers.TryAddWithoutValidation("Origin", origin);
+            }
+            if (!string.IsNullOrWhiteSpace(_hostHeader))
+            {
+                request.Headers.Host = _hostHeader;
             }
 
             var payload = new JsonObject

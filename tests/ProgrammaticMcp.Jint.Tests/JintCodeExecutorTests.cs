@@ -179,6 +179,7 @@ public sealed class JintCodeExecutorTests
                     const cycle = {};
                     cycle.self = cycle;
                     console.log({ b: 2, a: 1 });
+                    console.log(NaN, Infinity, -Infinity);
                     console.warn(Symbol('x'));
                     console.error(cycle);
                     return null;
@@ -186,8 +187,9 @@ public sealed class JintCodeExecutorTests
                 """));
 
         Assert.Equal("""{"a":1,"b":2}""", result.Console[0].Message);
-        Assert.Equal("Symbol(x)", result.Console[1].Message);
-        Assert.Equal("[Unserializable]", result.Console[2].Message);
+        Assert.Equal("NaN Infinity -Infinity", result.Console[1].Message);
+        Assert.Equal("Symbol(x)", result.Console[2].Message);
+        Assert.Equal("[Unserializable]", result.Console[3].Message);
     }
 
     [Fact]

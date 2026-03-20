@@ -48,7 +48,8 @@ In the ASP.NET Core integration, caller binding can come from:
 
 ## HTTP Transport Notes
 
-- the built-in cookie fallback is route-scoped, `HttpOnly`, and `SameSite=Lax`
+- the built-in cookie fallback is route-scoped, `HttpOnly`, `SameSite=Lax`, and `Secure` by default
+- the sample server only relaxes the cookie `Secure` flag for localhost-style development requests
 - same-origin checks are enforced on any MCP request that resolves caller binding from the built-in cookie
 - the built-in signed-header fallback is intended for clients that cannot preserve cookies but can hold a host-provisioned stable token
 - CORS policy remains host-owned

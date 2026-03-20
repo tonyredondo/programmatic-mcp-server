@@ -36,7 +36,8 @@ Validation coverage for the repository harness includes:
 - The built-in signed-header fallback is intended for non-cookie HTTP clients that can be provisioned with a stable `X-Programmatic-Mcp-Caller-Binding` token out of band.
 - The repository test harness validates both fallback paths through a stateless raw HTTP client, and it also validates the normal sessioned C# MCP SDK client path.
 - The signed-header bootstrap path is host-owned: the host generates a stable token through `IProgrammaticCallerBindingTokenService.CreateSignedHeaderToken(...)` and provisions it to the client out of band before the client reconnects with `X-Programmatic-Mcp-Caller-Binding`.
-- The built-in cookie fallback issues a route-scoped, `HttpOnly`, `SameSite=Lax` cookie and enforces same-origin checks on any MCP request that resolves caller binding from that cookie.
+- The built-in cookie fallback issues a route-scoped, `HttpOnly`, `SameSite=Lax`, `Secure` cookie by default and enforces same-origin checks on any MCP request that resolves caller binding from that cookie.
+- The sample server relaxes the cookie `Secure` flag only for localhost-style development requests.
 - Browser-style CORS configuration remains host-owned. The library does not enable CORS automatically.
 - Health endpoints also remain host-owned. The library does not map them automatically.
 

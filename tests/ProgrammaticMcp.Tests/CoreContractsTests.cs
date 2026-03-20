@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace ProgrammaticMcp.Tests;
 
@@ -235,6 +236,26 @@ public sealed class CoreContractsTests
         Assert.Contains("function bar(input: FooBarInput2): Promise<FooBarResult2>;", catalog.GeneratedTypeScript, StringComparison.Ordinal);
         Assert.Equal("foo.bar(input: FooBarInput2) -> Promise<FooBarResult2>", catalog.Capabilities[0].Signature);
         Assert.Equal("fooBar(input: FooBarInput) -> Promise<FooBarResult>", catalog.Capabilities[1].Signature);
+    }
+
+    [Fact]
+    public void GeneratedTypeScriptQuotesNonIdentifierJsonPropertyNames()
+    {
+        var catalog = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddCapability<AliasedPropertyInput, AliasedPropertyResult>(
+                "tasks.alias",
+                capability => capability
+                    .WithDescription("Uses non-identifier JSON property names.")
+                    .UseWhen("You need to verify generated TypeScript alignment.")
+                    .DoNotUseWhen("You are testing other schema paths.")
+                    .WithHandler((input, _) => ValueTask.FromResult(new AliasedPropertyResult(input.TaskId))))
+            .BuildCatalog();
+
+        Assert.Contains("\"task-id\": string", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Contains("\"status-code\": string", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Contains("\"task-id\"", catalog.Capabilities[0].Input.Schema!.ToJsonString(), StringComparison.Ordinal);
+        Assert.Contains("\"status-code\"", catalog.Capabilities[0].Result.Schema!.ToJsonString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -583,6 +604,10 @@ public sealed class CoreContractsTests
     public sealed record RepeatedNode(string Name, RepeatedLeaf Leaf);
 
     public sealed record RepeatedLeaf(int Count);
+
+    public sealed record AliasedPropertyInput([property: JsonPropertyName("task-id")] string TaskId);
+
+    public sealed record AliasedPropertyResult([property: JsonPropertyName("status-code")] string StatusCode);
 
     public sealed record CollidingDefinitionContainer(
         OuterAlpha.Node Left1,
