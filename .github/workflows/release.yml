@@ -48,7 +48,7 @@ jobs:
         run: dotnet restore ProgrammaticMcp.sln
 
       - name: Clean release outputs
-        run: dotnet clean ProgrammaticMcp.sln --configuration Release --no-restore
+        run: dotnet clean ProgrammaticMcp.sln --configuration Release
 
       - name: Build
         run: >
