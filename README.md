@@ -4,6 +4,11 @@
 
 The library is built around one idea: an agent should be able to discover a focused capability surface, generate code against that surface, run the code in a constrained runtime, and keep large intermediate results out of model context whenever possible.
 
+## References
+
+- https://www.anthropic.com/engineering/code-execution-with-mcp
+- https://blog.cloudflare.com/code-mode-mcp/
+
 ## What The Repository Provides Today
 
 The current implementation provides:
