@@ -6,9 +6,11 @@ using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
+using ProgrammaticMcp.Jint;
 using ProgrammaticMcp.SampleServer;
 
 namespace ProgrammaticMcp.AspNetCore.Tests;
@@ -484,8 +486,11 @@ public sealed class ProgrammaticMcpSampleServerTests
                     builder.UseEnvironment("Development");
                     builder.ConfigureServices(
                         services =>
-                            services.PostConfigure<ProgrammaticMcpServerOptions>(
-                                options => options.ExecutorOptions = options.ExecutorOptions with { MemoryBytes = 64 * 1024 * 1024 }));
+                        {
+                            // The sample host registers executor settings as a concrete singleton, so replace that service directly.
+                            services.RemoveAll<JintExecutorOptions>();
+                            services.AddSingleton(new JintExecutorOptions { MemoryBytes = 64 * 1024 * 1024 });
+                        });
                 });
     }
 
