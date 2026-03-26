@@ -8,8 +8,6 @@
     <PackageId>ProgrammaticMcp</PackageId>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <Version>0.1.0-preview.1</Version>
-    <Authors>ProgrammaticMcp contributors</Authors>
-    <Company>ProgrammaticMcp contributors</Company>
     <PackageTags>mcp;modelcontextprotocol;ai;agents;javascript;jint;aspnetcore</PackageTags>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <RepositoryType>git</RepositoryType>

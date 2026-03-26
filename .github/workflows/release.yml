@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  release:
+    types:
+      - created
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish-release-packages:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.101
+
+      - name: Derive release versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          raw_tag='${{ github.event.release.tag_name }}'
+          package_version="${raw_tag#v}"
+
+          # NuGet packages cannot use a leading "v" or SemVer build metadata.
+          if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; then
+            echo "Release tag '$raw_tag' must look like v1.2.3 or v1.2.3-preview.1" >&2
+            exit 1
+          fi
+
+          numeric_version="${package_version%%-*}"
+          IFS='.' read -r major minor patch <<< "$numeric_version"
+          assembly_version="${major}.${minor}.${patch}.0"
+
+          {
+            echo "PACKAGE_VERSION=$package_version"
+            echo "ASSEMBLY_VERSION=$assembly_version"
+          } >> "$GITHUB_ENV"
+
+      - name: Restore
+        run: dotnet restore ProgrammaticMcp.sln
+
+      - name: Clean release outputs
+        run: dotnet clean ProgrammaticMcp.sln --configuration Release --no-restore
+
+      - name: Build
+        run: >
+          dotnet build ProgrammaticMcp.sln
+          --configuration Release
+          --no-restore
+          -p:Version=${{ env.PACKAGE_VERSION }}
+          -p:PackageVersion=${{ env.PACKAGE_VERSION }}
+          -p:InformationalVersion=${{ env.PACKAGE_VERSION }}
+          -p:AssemblyVersion=${{ env.ASSEMBLY_VERSION }}
+          -p:FileVersion=${{ env.ASSEMBLY_VERSION }}
+
+      - name: Pack libraries
+        run: |
+          dotnet pack src/ProgrammaticMcp/ProgrammaticMcp.csproj --configuration Release --no-build -p:Version=${{ env.PACKAGE_VERSION }} -p:PackageVersion=${{ env.PACKAGE_VERSION }} -p:InformationalVersion=${{ env.PACKAGE_VERSION }} -p:AssemblyVersion=${{ env.ASSEMBLY_VERSION }} -p:FileVersion=${{ env.ASSEMBLY_VERSION }}
+          dotnet pack src/ProgrammaticMcp.Jint/ProgrammaticMcp.Jint.csproj --configuration Release --no-build -p:Version=${{ env.PACKAGE_VERSION }} -p:PackageVersion=${{ env.PACKAGE_VERSION }} -p:InformationalVersion=${{ env.PACKAGE_VERSION }} -p:AssemblyVersion=${{ env.ASSEMBLY_VERSION }} -p:FileVersion=${{ env.ASSEMBLY_VERSION }}
+          dotnet pack src/ProgrammaticMcp.AspNetCore/ProgrammaticMcp.AspNetCore.csproj --configuration Release --no-build -p:Version=${{ env.PACKAGE_VERSION }} -p:PackageVersion=${{ env.PACKAGE_VERSION }} -p:InformationalVersion=${{ env.PACKAGE_VERSION }} -p:AssemblyVersion=${{ env.ASSEMBLY_VERSION }} -p:FileVersion=${{ env.ASSEMBLY_VERSION }}
+
+      - name: Verify local packages
+        env:
+          PACKAGE_VERSION: ${{ env.PACKAGE_VERSION }}
+        run: ./scripts/verify-local-packages.sh
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages-${{ env.PACKAGE_VERSION }}
+          path: artifacts/packages/*
+          if-no-files-found: error
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release upload "${{ github.event.release.tag_name }}"
+          artifacts/packages/*
+          --clobber

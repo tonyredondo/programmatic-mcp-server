@@ -9,6 +9,15 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 export NUGET_PACKAGES="$WORK_DIR/.nuget/packages"
 export NUGET_HTTP_CACHE_PATH="$WORK_DIR/.nuget/http-cache"
 export NUGET_PLUGINS_CACHE_PATH="$WORK_DIR/.nuget/plugins-cache"
+# Override this when validating packages built from a specific release tag.
+PACKAGE_VERSION="${PACKAGE_VERSION:-0.1.0-preview.1}"
+if [[ -n "${ASSEMBLY_VERSION:-}" ]]; then
+  RESOLVED_ASSEMBLY_VERSION="$ASSEMBLY_VERSION"
+else
+  NUMERIC_PACKAGE_VERSION="${PACKAGE_VERSION%%-*}"
+  IFS='.' read -r major minor patch <<< "$NUMERIC_PACKAGE_VERSION"
+  RESOLVED_ASSEMBLY_VERSION="${major}.${minor}.${patch}.0"
+fi
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -58,7 +67,7 @@ verify_package_metadata() {
     exit 1
   }
 
-  [[ "$nuspec" == *"<version>0.1.0-preview.1</version>"* ]] || {
+  [[ "$nuspec" == *"<version>$PACKAGE_VERSION</version>"* ]] || {
     echo "Package $package_name has unexpected nuspec version." >&2
     exit 1
   }
@@ -86,9 +95,11 @@ require_command zipinfo
 echo "Packing library packages into $ARTIFACT_DIR"
 rm -rf "$ARTIFACT_DIR"
 dotnet restore "$ROOT_DIR/ProgrammaticMcp.sln" >/dev/null
-dotnet pack "$ROOT_DIR/src/ProgrammaticMcp/ProgrammaticMcp.csproj" --configuration Release --no-restore
-dotnet pack "$ROOT_DIR/src/ProgrammaticMcp.Jint/ProgrammaticMcp.Jint.csproj" --configuration Release --no-restore
-dotnet pack "$ROOT_DIR/src/ProgrammaticMcp.AspNetCore/ProgrammaticMcp.AspNetCore.csproj" --configuration Release --no-restore
+# Clear prior Release outputs so every target framework picks up the requested version.
+dotnet clean "$ROOT_DIR/ProgrammaticMcp.sln" --configuration Release >/dev/null
+dotnet pack "$ROOT_DIR/src/ProgrammaticMcp/ProgrammaticMcp.csproj" --configuration Release --no-restore -p:Version="$PACKAGE_VERSION" -p:PackageVersion="$PACKAGE_VERSION" -p:InformationalVersion="$PACKAGE_VERSION" -p:AssemblyVersion="$RESOLVED_ASSEMBLY_VERSION" -p:FileVersion="$RESOLVED_ASSEMBLY_VERSION"
+dotnet pack "$ROOT_DIR/src/ProgrammaticMcp.Jint/ProgrammaticMcp.Jint.csproj" --configuration Release --no-restore -p:Version="$PACKAGE_VERSION" -p:PackageVersion="$PACKAGE_VERSION" -p:InformationalVersion="$PACKAGE_VERSION" -p:AssemblyVersion="$RESOLVED_ASSEMBLY_VERSION" -p:FileVersion="$RESOLVED_ASSEMBLY_VERSION"
+dotnet pack "$ROOT_DIR/src/ProgrammaticMcp.AspNetCore/ProgrammaticMcp.AspNetCore.csproj" --configuration Release --no-restore -p:Version="$PACKAGE_VERSION" -p:PackageVersion="$PACKAGE_VERSION" -p:InformationalVersion="$PACKAGE_VERSION" -p:AssemblyVersion="$RESOLVED_ASSEMBLY_VERSION" -p:FileVersion="$RESOLVED_ASSEMBLY_VERSION"
 
 verify_package_metadata ProgrammaticMcp
 verify_package_metadata ProgrammaticMcp.Jint
@@ -108,9 +119,9 @@ cat > "$APP_DIR/NuGet.Config" <<EOF
 </configuration>
 EOF
 
-dotnet add "$APP_DIR/PackageSmoke.csproj" package ProgrammaticMcp --version 0.1.0-preview.1 --no-restore >/dev/null
-dotnet add "$APP_DIR/PackageSmoke.csproj" package ProgrammaticMcp.Jint --version 0.1.0-preview.1 --no-restore >/dev/null
-dotnet add "$APP_DIR/PackageSmoke.csproj" package ProgrammaticMcp.AspNetCore --version 0.1.0-preview.1 --no-restore >/dev/null
+dotnet add "$APP_DIR/PackageSmoke.csproj" package ProgrammaticMcp --version "$PACKAGE_VERSION" --no-restore >/dev/null
+dotnet add "$APP_DIR/PackageSmoke.csproj" package ProgrammaticMcp.Jint --version "$PACKAGE_VERSION" --no-restore >/dev/null
+dotnet add "$APP_DIR/PackageSmoke.csproj" package ProgrammaticMcp.AspNetCore --version "$PACKAGE_VERSION" --no-restore >/dev/null
 
 cat > "$APP_DIR/Program.cs" <<'EOF'
 using ProgrammaticMcp;

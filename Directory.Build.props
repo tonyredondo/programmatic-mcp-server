@@ -5,6 +5,8 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <Authors>Tony Redondo</Authors>
+    <Company>Tony Redondo</Company>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IsPackable)' == 'true'">
@@ -12,8 +14,6 @@
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <Version>0.1.0-preview.1</Version>
-    <Authors>ProgrammaticMcp contributors</Authors>
-    <Company>ProgrammaticMcp contributors</Company>
     <PackageTags>mcp;modelcontextprotocol;ai;agents;javascript;jint;aspnetcore</PackageTags>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <RepositoryType>git</RepositoryType>
