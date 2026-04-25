@@ -34,5 +34,5 @@ Use this package when you want the shared contracts and registration model witho
 - read-only resources are separate from the generated `programmatic.*` namespace and do not affect generated TypeScript or `capabilityVersion`
 - sampling tools are separate from the capability catalog and do not affect `capabilityVersion`
 - mutation flows require an explicit authorization policy choice
-- `client` is a reserved top-level programmatic namespace segment for forward compatibility
+- generated TypeScript identifiers are reserved as capability and mutation path segments, including `client`, JavaScript/TypeScript keywords, and prototype-pollution-sensitive names
 - the built-in stores are in-memory and intended for the documented v0 scope
