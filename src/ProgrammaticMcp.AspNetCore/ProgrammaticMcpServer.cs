@@ -391,6 +391,7 @@ internal sealed class ProgrammaticMcpShutdownCoordinator
 {
     private readonly TaskCompletionSource _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource _forcedCancellation = new();
+    private readonly object _gate = new();
     private int _activeOperations;
     private volatile bool _stopping;
 
@@ -400,21 +401,28 @@ internal sealed class ProgrammaticMcpShutdownCoordinator
 
     public IDisposable Enter()
     {
-        if (_stopping)
+        lock (_gate)
         {
-            throw new InvalidOperationException("The server is shutting down.");
+            if (_stopping)
+            {
+                throw new InvalidOperationException("The server is shutting down.");
+            }
+
+            _activeOperations++;
         }
 
-        Interlocked.Increment(ref _activeOperations);
         return new Lease(this);
     }
 
     public void BeginShutdown()
     {
-        _stopping = true;
-        if (Volatile.Read(ref _activeOperations) == 0)
+        lock (_gate)
         {
-            _drained.TrySetResult();
+            _stopping = true;
+            if (_activeOperations == 0)
+            {
+                _drained.TrySetResult();
+            }
         }
     }
 
@@ -431,9 +439,13 @@ internal sealed class ProgrammaticMcpShutdownCoordinator
 
     private void Release()
     {
-        if (Interlocked.Decrement(ref _activeOperations) == 0 && _stopping)
+        lock (_gate)
         {
-            _drained.TrySetResult();
+            _activeOperations--;
+            if (_activeOperations == 0 && _stopping)
+            {
+                _drained.TrySetResult();
+            }
         }
     }
 
@@ -1501,6 +1513,34 @@ internal sealed class ProgrammaticMcpToolHandlers(
             return CreateSuccess(new MutationApplyResponse(1, catalog.CapabilityVersion, "not_found", approvalId, null, null, Array.Empty<ExecutionArtifactDescriptor>(), null, null, null, null));
         }
 
+        var capability = catalog.Capabilities.SingleOrDefault(item => item.IsMutation && item.MutationApplyHandler is not null && item.ApiPath == approval!.MutationName);
+        if (capability is null)
+        {
+            var missingMutationTransition = await approvalStore.TryTransitionAsync(
+                approvalId,
+                ApprovalState.Pending,
+                current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "mutation_not_registered" },
+                cancellationToken);
+            if (missingMutationTransition.Status != ApprovalTransitionStatus.Success || missingMutationTransition.Approval is null)
+            {
+                return CreateSuccess(new MutationApplyResponse(1, catalog.CapabilityVersion, "not_found", approvalId, null, null, Array.Empty<ExecutionArtifactDescriptor>(), null, null, null, null));
+            }
+
+            return CreateSuccess(
+                new MutationApplyResponse(
+                    1,
+                    catalog.CapabilityVersion,
+                    "failed",
+                    approvalId,
+                    missingMutationTransition.Approval.ActionArgsHash,
+                    null,
+                    Array.Empty<ExecutionArtifactDescriptor>(),
+                    null,
+                    "mutation_not_registered",
+                    false,
+                    "The approved mutation is no longer registered."));
+        }
+
         var transition = await approvalStore.TryTransitionAsync(
             approvalId,
             ApprovalState.Pending,
@@ -1511,7 +1551,6 @@ internal sealed class ProgrammaticMcpToolHandlers(
             return CreateSuccess(new MutationApplyResponse(1, catalog.CapabilityVersion, "not_found", approvalId, null, null, Array.Empty<ExecutionArtifactDescriptor>(), null, null, null, null));
         }
 
-        var capability = catalog.Capabilities.Single(item => item.IsMutation && item.MutationApplyHandler is not null && item.ApiPath == transition.Approval!.MutationName);
         var writer = new TransportArtifactWriter(
             artifactStore,
             conversationId,
@@ -1535,6 +1574,31 @@ internal sealed class ProgrammaticMcpToolHandlers(
             applyCancellation.Token,
             writer);
 
+        CallToolResult CreateApplyOutcomeUnknownResponse()
+            => CreateSuccess(
+                new MutationApplyResponse(
+                    1,
+                    catalog.CapabilityVersion,
+                    "failed",
+                    approvalId,
+                    transition.Approval!.ActionArgsHash,
+                    null,
+                    Array.Empty<ExecutionArtifactDescriptor>(),
+                    null,
+                    "apply_outcome_unknown",
+                    false,
+                    "The mutation apply outcome is unknown."));
+
+        async ValueTask<bool> TryFinalizeApplyAsync(Func<PendingApproval, PendingApproval> finalTransition)
+        {
+            var finalState = await approvalStore.TryTransitionAsync(
+                approvalId,
+                ApprovalState.Applying,
+                finalTransition,
+                CancellationToken.None);
+            return finalState.Status == ApprovalTransitionStatus.Success;
+        }
+
         try
         {
             var applyHandler = capability.MutationApplyHandler ?? throw new InvalidOperationException("Mutation apply handler is not registered.");
@@ -1546,11 +1610,10 @@ internal sealed class ProgrammaticMcpToolHandlers(
                     JsonSchemaValidator.Validate(applyResult.Value, capability.ApplyResultSchema);
                 }
 
-                await approvalStore.TryTransitionAsync(
-                    approvalId,
-                    ApprovalState.Applying,
-                    current => current with { State = ApprovalState.Completed, ApplyingSinceUtc = null },
-                    CancellationToken.None);
+                if (!await TryFinalizeApplyAsync(current => current with { State = ApprovalState.Completed, ApplyingSinceUtc = null }))
+                {
+                    return CreateApplyOutcomeUnknownResponse();
+                }
 
                 var artifacts = writer.Descriptors.ToArray();
                 return CreateSuccess(
@@ -1559,10 +1622,10 @@ internal sealed class ProgrammaticMcpToolHandlers(
                         catalog.CapabilityVersion,
                         "completed",
                         approvalId,
-                        transition.Approval.ActionArgsHash,
+                        transition.Approval!.ActionArgsHash,
                         applyResult.Value,
                         artifacts,
-                        artifacts.FirstOrDefault(static item => item.Kind == "execution.result")?.ArtifactId,
+                        null,
                         null,
                         null,
                         null));
@@ -1571,19 +1634,17 @@ internal sealed class ProgrammaticMcpToolHandlers(
             var failureCode = applyResult.FailureCode ?? "apply_handler_error";
             if (applyResult.FailureKind == MutationApplyFailureKind.Retryable)
             {
-                await approvalStore.TryTransitionAsync(
-                    approvalId,
-                    ApprovalState.Applying,
-                    current => current with { State = ApprovalState.Pending, ApplyingSinceUtc = null, FailureCode = failureCode },
-                    CancellationToken.None);
+                if (!await TryFinalizeApplyAsync(current => current with { State = ApprovalState.Pending, ApplyingSinceUtc = null, FailureCode = failureCode }))
+                {
+                    return CreateApplyOutcomeUnknownResponse();
+                }
             }
             else
             {
-                await approvalStore.TryTransitionAsync(
-                    approvalId,
-                    ApprovalState.Applying,
-                    current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = failureCode },
-                    CancellationToken.None);
+                if (!await TryFinalizeApplyAsync(current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = failureCode }))
+                {
+                    return CreateApplyOutcomeUnknownResponse();
+                }
             }
 
             return CreateSuccess(
@@ -1592,7 +1653,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
                     catalog.CapabilityVersion,
                     "failed",
                     approvalId,
-                    transition.Approval.ActionArgsHash,
+                    transition.Approval!.ActionArgsHash,
                     null,
                     Array.Empty<ExecutionArtifactDescriptor>(),
                     null,
@@ -1603,11 +1664,10 @@ internal sealed class ProgrammaticMcpToolHandlers(
         catch (JsonSchemaValidationException exception)
         {
             logger.LogWarning(exception, "Mutation apply result validation failed for approval {ApprovalId}.", approvalId);
-            await approvalStore.TryTransitionAsync(
-                approvalId,
-                ApprovalState.Applying,
-                current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "validation_failed" },
-                CancellationToken.None);
+            if (!await TryFinalizeApplyAsync(current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "validation_failed" }))
+            {
+                return CreateApplyOutcomeUnknownResponse();
+            }
 
             return CreateSuccess(
                 new MutationApplyResponse(
@@ -1615,7 +1675,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
                     catalog.CapabilityVersion,
                     "failed",
                     approvalId,
-                    transition.Approval.ActionArgsHash,
+                    transition.Approval!.ActionArgsHash,
                     null,
                     Array.Empty<ExecutionArtifactDescriptor>(),
                     null,
@@ -1626,11 +1686,10 @@ internal sealed class ProgrammaticMcpToolHandlers(
         catch (OperationCanceledException) when (applyCancellation.IsCancellationRequested)
         {
             logger.LogWarning("Mutation apply was cancelled during shutdown for approval {ApprovalId}.", approvalId);
-            await approvalStore.TryTransitionAsync(
-                approvalId,
-                ApprovalState.Applying,
-                current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "apply_outcome_unknown" },
-                CancellationToken.None);
+            if (!await TryFinalizeApplyAsync(current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "apply_outcome_unknown" }))
+            {
+                return CreateApplyOutcomeUnknownResponse();
+            }
 
             return CreateSuccess(
                 new MutationApplyResponse(
@@ -1638,7 +1697,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
                     catalog.CapabilityVersion,
                     "failed",
                     approvalId,
-                    transition.Approval.ActionArgsHash,
+                    transition.Approval!.ActionArgsHash,
                     null,
                     Array.Empty<ExecutionArtifactDescriptor>(),
                     null,
@@ -1649,11 +1708,10 @@ internal sealed class ProgrammaticMcpToolHandlers(
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             logger.LogError(exception, "Mutation apply failed unexpectedly for approval {ApprovalId}.", approvalId);
-            await approvalStore.TryTransitionAsync(
-                approvalId,
-                ApprovalState.Applying,
-                current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "apply_handler_error" },
-                CancellationToken.None);
+            if (!await TryFinalizeApplyAsync(current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "apply_handler_error" }))
+            {
+                return CreateApplyOutcomeUnknownResponse();
+            }
 
             return CreateSuccess(
                 new MutationApplyResponse(
@@ -1661,7 +1719,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
                     catalog.CapabilityVersion,
                     "failed",
                     approvalId,
-                    transition.Approval.ActionArgsHash,
+                    transition.Approval!.ActionArgsHash,
                     null,
                     Array.Empty<ExecutionArtifactDescriptor>(),
                     null,
@@ -1925,7 +1983,7 @@ internal sealed class ProgrammaticMcpToolHandlers(
         public async ValueTask<ExecutionArtifactDescriptor> WriteJsonArtifactAsync(string name, JsonNode payload, CancellationToken cancellationToken = default)
         {
             var text = CanonicalJson.Serialize(payload);
-            return await WriteAsync("execution.result", name, "application/json", text, cancellationToken);
+            return await WriteAsync("handler.output", name, "application/json", text, cancellationToken);
         }
 
         public async ValueTask<ExecutionArtifactDescriptor> WriteTextArtifactAsync(string name, string content, string mimeType, CancellationToken cancellationToken = default)

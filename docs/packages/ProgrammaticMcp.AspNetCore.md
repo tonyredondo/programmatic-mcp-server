@@ -24,4 +24,4 @@ Use this package when you want the first supported HTTP transport for the librar
 - mutation handlers, resource readers, and sampling-tool handlers receive blocked sampling clients instead of live sampling
 - cookie-based caller binding is intended for same-origin or trusted localhost flows
 - the `/types` endpoint inherits the mapped route's authorization behavior
-- external client compatibility expectations are documented in [`../client-compatibility.md`](../client-compatibility.md)
+- external client compatibility expectations are documented in [client compatibility](https://github.com/tonyredondo/programmatic-mcp-server/blob/main/docs/client-compatibility.md)

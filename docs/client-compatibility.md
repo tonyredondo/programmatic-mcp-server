@@ -39,7 +39,7 @@ Validation coverage for the repository harness includes:
 
 ## Current Compatibility Notes
 
-- `client` is now a reserved top-level programmatic namespace segment. Hosts should not register capabilities or mutations under `client.*`.
+- Generated TypeScript identifiers are reserved as capability and mutation path segments. Hosts should not register capabilities or mutations with `client`, JavaScript/TypeScript keywords, or prototype-pollution-sensitive names in any path segment.
 - The built-in cookie fallback is intended for HTTP MCP clients that preserve cookies across reconnects.
 - The built-in signed-header fallback is intended for non-cookie HTTP clients that can be provisioned with a stable `X-Programmatic-Mcp-Caller-Binding` token out of band.
 - The repository test harness validates the normal sessioned C# MCP SDK client path and also validates cookie and signed-header reconnect flows through both the SDK harness and the stateless raw HTTP harness.

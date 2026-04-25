@@ -77,10 +77,16 @@ verify_package_metadata() {
     exit 1
   }
 
-  unzip -p "$package_file" "$readme_path" >/dev/null || {
+  local readme
+  readme="$(unzip -p "$package_file" "$readme_path")" || {
     echo "Package $package_name is missing the declared readme file $readme_path." >&2
     exit 1
   }
+
+  if [[ "$readme" == *"]("../* || "$readme" == *"](./"* ]]; then
+    echo "Package $package_name readme contains repo-relative links that will not resolve from NuGet." >&2
+    exit 1
+  fi
 
   zipinfo -1 "$package_file" | grep_extended -q '^lib/.+\.xml$' || {
     echo "Package $package_name is missing XML documentation output." >&2
