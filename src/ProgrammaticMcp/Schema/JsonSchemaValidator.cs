@@ -33,6 +33,11 @@ public static class JsonSchemaValidator
     {
         var schemaObject = schema.AsObject();
 
+        if (schemaObject.TryGetPropertyValue("const", out var constNode))
+        {
+            EnsureConst(value, constNode, path);
+        }
+
         if (schemaObject["anyOf"] is JsonArray anyOfArray)
         {
             foreach (var candidate in anyOfArray)
@@ -139,6 +144,14 @@ public static class JsonSchemaValidator
         }
 
         throw new JsonSchemaValidationException($"Unsupported JSON shape at {path}.");
+    }
+
+    private static void EnsureConst(JsonNode? value, JsonNode? constNode, string path)
+    {
+        if (!string.Equals(CanonicalJson.Serialize(value), CanonicalJson.Serialize(constNode), StringComparison.Ordinal))
+        {
+            throw new JsonSchemaValidationException($"Value at {path} does not match the required constant.");
+        }
     }
 
     private static JsonNode ResolveReference(string reference, JsonNode rootSchema)

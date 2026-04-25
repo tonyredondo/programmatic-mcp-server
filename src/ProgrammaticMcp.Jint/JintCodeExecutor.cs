@@ -794,38 +794,42 @@ public sealed class JintCodeExecutor : ICodeExecutor
 
         public async Task<HostCallResponse> SampleAsync(object? argument)
         {
-            JsonNode? requestNode;
+            var gateEntered = false;
             try
             {
-                requestNode = ConvertBridgeArgument(argument);
-            }
-            catch (StructuredBridgeException exception)
-            {
-                _diagnostics.Add(new ExecutionDiagnostic(exception.Code, exception.Message, exception.Data));
-                return HostCallResponse.FromFailure(exception.ToJsError());
-            }
+                await _gate.WaitAsync(ExecutionCancellationToken);
+                gateEntered = true;
 
-            if (requestNode is not JsonObject requestObject)
-            {
-                var exception = new StructuredBridgeException("invalid_params", "Sampling request must be a JSON object.");
-                _diagnostics.Add(new ExecutionDiagnostic(exception.Code, exception.Message, exception.Data));
-                return HostCallResponse.FromFailure(exception.ToJsError());
-            }
+                JsonNode? requestNode;
+                try
+                {
+                    requestNode = ConvertBridgeArgument(argument);
+                }
+                catch (StructuredBridgeException exception)
+                {
+                    _diagnostics.Add(new ExecutionDiagnostic(exception.Code, exception.Message, exception.Data));
+                    return HostCallResponse.FromFailure(exception.ToJsError());
+                }
 
-            ProgrammaticSamplingRequest request;
-            try
-            {
-                request = JsonSerializerContract.DeserializeFromNode<ProgrammaticSamplingRequest>(requestObject);
-            }
-            catch (Exception exception) when (exception is InvalidOperationException or JsonException or NotSupportedException)
-            {
-                var structured = new StructuredBridgeException("invalid_params", "Sampling request could not be deserialized.");
-                _diagnostics.Add(new ExecutionDiagnostic(structured.Code, structured.Message, structured.Data));
-                return HostCallResponse.FromFailure(structured.ToJsError());
-            }
+                if (requestNode is not JsonObject requestObject)
+                {
+                    var exception = new StructuredBridgeException("invalid_params", "Sampling request must be a JSON object.");
+                    _diagnostics.Add(new ExecutionDiagnostic(exception.Code, exception.Message, exception.Data));
+                    return HostCallResponse.FromFailure(exception.ToJsError());
+                }
 
-            try
-            {
+                ProgrammaticSamplingRequest request;
+                try
+                {
+                    request = JsonSerializerContract.DeserializeFromNode<ProgrammaticSamplingRequest>(requestObject);
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or JsonException or NotSupportedException)
+                {
+                    var structured = new StructuredBridgeException("invalid_params", "Sampling request could not be deserialized.");
+                    _diagnostics.Add(new ExecutionDiagnostic(structured.Code, structured.Message, structured.Data));
+                    return HostCallResponse.FromFailure(structured.ToJsError());
+                }
+
                 var result = request.EnableTools
                     ? await CreateToolEnabledSamplingResultAsync(request)
                     : await _executionSamplingClient.CreateMessageAsync(request, ExecutionCancellationToken);
@@ -855,6 +859,13 @@ public sealed class JintCodeExecutor : ICodeExecutor
                     });
                 _diagnostics.Add(new ExecutionDiagnostic(exception.Code, exception.Message, exception.Data));
                 return HostCallResponse.FromFailure(exception.ToJsError());
+            }
+            finally
+            {
+                if (gateEntered)
+                {
+                    _gate.Release();
+                }
             }
         }
 
@@ -913,11 +924,6 @@ public sealed class JintCodeExecutor : ICodeExecutor
             var structuredClient = ProgrammaticSamplingServiceResolver.ResolveStructured(services);
             if (structuredClient.IsSupported)
             {
-                if (structuredClient is IProgrammaticSamplingClient dualInterfaceClient)
-                {
-                    return (dualInterfaceClient, structuredClient);
-                }
-
                 return (
                     new StructuredBackedProgrammaticSamplingClient(structuredClient, services, conversationId, callerBindingId),
                     structuredClient);
@@ -1913,7 +1919,6 @@ public sealed class JintCodeExecutor : ICodeExecutor
         private static readonly JsonSerializerOptions Options = new()
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DictionaryKeyPolicy = JsonNamingPolicy.CamelCase,
             DefaultIgnoreCondition = JsonIgnoreCondition.Never,
             Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
         };

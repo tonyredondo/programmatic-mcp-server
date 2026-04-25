@@ -2308,6 +2308,73 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     }
 
     [Fact]
+    public async Task ApplyMarksApprovalTerminalWhenMutationIsNoLongerRegistered()
+    {
+        var store = new InMemoryApprovalStore();
+        const string CallerBindingId = "stale-client";
+        var seeded = CreatePendingApproval("conv-stale-mutation", CallerBindingId, "tasks.removed");
+        await store.CreateAsync(seeded);
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            enableSignedHeader: true,
+            includeDefaultCatalog: false,
+            configureOptions: options => options.EnableStatefulHttpTransport = false,
+            configureServices: services => services.AddSingleton<IApprovalStore>(store));
+        var token = host.Services.GetRequiredService<IProgrammaticCallerBindingTokenService>().CreateSignedHeaderToken(CallerBindingId);
+        await using var client = await host.CreateSdkClientAsync(signedHeaderToken: token);
+
+        var apply = await client.CallToolAsync(
+            "mutation.apply",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-stale-mutation",
+                ["approvalId"] = seeded.ApprovalId,
+                ["approvalNonce"] = seeded.ApprovalNonce
+            });
+
+        var applyNode = ParseStructuredContent(apply);
+        Assert.Equal("failed", applyNode["status"]!.GetValue<string>());
+        Assert.Equal("mutation_not_registered", applyNode["failureCode"]!.GetValue<string>());
+        var stored = await store.GetAsync(seeded.ApprovalId);
+        Assert.Equal(ApprovalState.FailedTerminal, stored!.State);
+        Assert.Equal("mutation_not_registered", stored.FailureCode);
+    }
+
+    [Fact]
+    public async Task ApplyReturnsUnknownOutcomeWhenCompletionTransitionIsRejected()
+    {
+        var store = new ApplyingCompletionConflictStore();
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            configureServices: services => services.AddSingleton<IApprovalStore>(store));
+        await using var client = await host.CreateSessionClientAsync();
+
+        var preview = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-transition-conflict",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.complete({ taskId: "task-conflict" });
+                           }
+                           """
+            });
+        var approval = Assert.Single(ParseStructuredContent(preview)["approvalsRequested"]!.AsArray());
+
+        var apply = await client.CallToolAsync(
+            "mutation.apply",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-transition-conflict",
+                ["approvalId"] = approval!["approvalId"]!.GetValue<string>(),
+                ["approvalNonce"] = approval["approvalNonce"]!.GetValue<string>()
+            });
+
+        var applyNode = ParseStructuredContent(apply);
+        Assert.Equal("failed", applyNode["status"]!.GetValue<string>());
+        Assert.Equal("apply_outcome_unknown", applyNode["failureCode"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task ApplyArtifactsUseConfiguredChunkSizeInDescriptors()
     {
         await using var host = await ProgrammaticMcpTestHost.StartAsync(
@@ -2369,6 +2436,69 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         var artifact = artifactNode!.AsObject();
         Assert.Equal(11, artifact["totalBytes"]!.GetValue<int>());
         Assert.Equal(3, artifact["totalChunks"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task JsonApplyArtifactsAreHandlerOutputsAndNotResultArtifacts()
+    {
+        await using var host = await ProgrammaticMcpTestHost.StartAsync(
+            includeDefaultCatalog: false,
+            configureCatalog: catalog =>
+            {
+                catalog.AddMutation<CompleteTaskArgs, CompleteTaskPreview, CompleteTaskApplyResult>(
+                    "tasks.jsonArtifact",
+                    mutation => mutation
+                        .WithDescription("Writes a JSON apply artifact.")
+                        .UseWhen("You are testing artifact descriptors.")
+                        .DoNotUseWhen("You are doing normal work.")
+                        .WithPreviewHandler((args, _) => ValueTask.FromResult(new CompleteTaskPreview(args.TaskId, true)))
+                        .WithSummaryFactory((args, _, _) => ValueTask.FromResult("JSON " + args.TaskId))
+                        .WithApplyHandler(
+                            async (args, context) =>
+                            {
+                                await context.Artifacts!.WriteJsonArtifactAsync("details.json", new JsonObject { ["taskId"] = args.TaskId }, context.CancellationToken);
+                                return MutationApplyResult<CompleteTaskApplyResult>.Success(new CompleteTaskApplyResult(args.TaskId, "done"));
+                            }));
+            });
+        await using var client = await host.CreateSessionClientAsync();
+
+        var preview = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-json-apply-artifact",
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.tasks.jsonArtifact({ taskId: "task-1" });
+                           }
+                           """
+            });
+        var approval = Assert.Single(ParseStructuredContent(preview)["approvalsRequested"]!.AsArray());
+
+        var apply = await client.CallToolAsync(
+            "mutation.apply",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-json-apply-artifact",
+                ["approvalId"] = approval!["approvalId"]!.GetValue<string>(),
+                ["approvalNonce"] = approval["approvalNonce"]!.GetValue<string>()
+            });
+
+        var applyNode = ParseStructuredContent(apply);
+        Assert.Equal("completed", applyNode["status"]!.GetValue<string>());
+        Assert.Null(applyNode["resultArtifactId"]);
+        var artifact = Assert.Single(applyNode["artifacts"]!.AsArray())!.AsObject();
+        Assert.Equal("handler.output", artifact["kind"]!.GetValue<string>());
+
+        var artifactRead = await client.CallToolAsync(
+            "artifact.read",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "conv-json-apply-artifact",
+                ["artifactId"] = artifact["artifactId"]!.GetValue<string>()
+            });
+        var artifactReadNode = ParseStructuredContent(artifactRead);
+        Assert.Equal("handler.output", artifactReadNode["kind"]!.GetValue<string>());
     }
 
     [Fact]
@@ -2565,6 +2695,47 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     }
 
     [Fact]
+    public async Task ShutdownCoordinatorDoesNotDrainUntilAdmittedOperationsRelease()
+    {
+        var coordinator = new ProgrammaticMcpShutdownCoordinator();
+        var lease = coordinator.Enter();
+
+        coordinator.BeginShutdown();
+
+        Assert.False(await coordinator.WaitForDrainAsync(TimeSpan.FromMilliseconds(20), CancellationToken.None));
+        Assert.Throws<InvalidOperationException>(() => coordinator.Enter());
+
+        lease.Dispose();
+
+        Assert.True(await coordinator.WaitForDrainAsync(TimeSpan.FromSeconds(1), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ShutdownCoordinatorKeepsConcurrentAdmissionAndDrainAtomic()
+    {
+        var coordinator = new ProgrammaticMcpShutdownCoordinator();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var operation = Task.Run(
+            async () =>
+            {
+                using var lease = coordinator.Enter();
+                entered.SetResult();
+                await release.Task;
+            });
+
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        coordinator.BeginShutdown();
+
+        Assert.False(await coordinator.WaitForDrainAsync(TimeSpan.FromMilliseconds(20), CancellationToken.None));
+
+        release.SetResult();
+        await operation.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.True(await coordinator.WaitForDrainAsync(TimeSpan.FromSeconds(1), CancellationToken.None));
+    }
+
+    [Fact]
     public async Task GracefulShutdownWaitsForInFlightExecutionAndEmitsActivitiesAndHealth()
     {
         var gate = new BlockingProbe();
@@ -2757,6 +2928,24 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         }
 
         throw new Xunit.Sdk.XunitException("Structured content was not available on the tool result.");
+    }
+
+    private static JsonObject ParseStructuredContent(RawMcpResponse response)
+    {
+        if (response.StructuredContent.Count > 0)
+        {
+            return response.StructuredContent;
+        }
+
+        var mirroredText = response.Result["content"]?.AsArray()
+            .Select(static item => item?["text"]?.GetValue<string>())
+            .FirstOrDefault(static text => !string.IsNullOrWhiteSpace(text));
+        if (!string.IsNullOrWhiteSpace(mirroredText))
+        {
+            return JsonNode.Parse(mirroredText)!.AsObject();
+        }
+
+        throw new Xunit.Sdk.XunitException("Structured content was not available on the raw tool result.");
     }
 
     private static string ExtractStringResult(CallToolResult result)
@@ -2958,6 +3147,17 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
     }
 
     private static PendingApproval CreateApplyingApproval(string conversationId, string callerBindingId, string mutationName)
+        => CreateApproval(conversationId, callerBindingId, mutationName, ApprovalState.Applying, DateTimeOffset.UtcNow.AddMinutes(-2));
+
+    private static PendingApproval CreatePendingApproval(string conversationId, string callerBindingId, string mutationName)
+        => CreateApproval(conversationId, callerBindingId, mutationName, ApprovalState.Pending, null);
+
+    private static PendingApproval CreateApproval(
+        string conversationId,
+        string callerBindingId,
+        string mutationName,
+        ApprovalState state,
+        DateTimeOffset? applyingSinceUtc)
     {
         var approvalId = ApprovalTokenGenerator.GenerateApprovalId();
         var nonce = ApprovalTokenGenerator.GenerateApprovalNonce();
@@ -2984,8 +3184,8 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
             DateTimeOffset.UtcNow.AddMinutes(5),
             conversationId,
             callerBindingId,
-            ApprovalState.Applying,
-            DateTimeOffset.UtcNow.AddMinutes(-2),
+            state,
+            applyingSinceUtc,
             null);
     }
 
@@ -3412,6 +3612,45 @@ public sealed class ProgrammaticMcpAspNetCoreIntegrationTests
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private sealed class ApplyingCompletionConflictStore : IApprovalStore
+    {
+        private readonly InMemoryApprovalStore _inner = new();
+
+        public ValueTask CreateAsync(PendingApproval approval, CancellationToken cancellationToken = default)
+            => _inner.CreateAsync(approval, cancellationToken);
+
+        public ValueTask<PendingApproval?> GetAsync(string approvalId, CancellationToken cancellationToken = default)
+            => _inner.GetAsync(approvalId, cancellationToken);
+
+        public ValueTask<IReadOnlyList<PendingApproval>> ListPendingAsync(string conversationId, string callerBindingId, CancellationToken cancellationToken = default)
+            => _inner.ListPendingAsync(conversationId, callerBindingId, cancellationToken);
+
+        public async ValueTask<ApprovalTransitionResult> TryTransitionAsync(
+            string approvalId,
+            ApprovalState expectedState,
+            Func<PendingApproval, PendingApproval> transition,
+            CancellationToken cancellationToken = default)
+        {
+            if (expectedState == ApprovalState.Applying)
+            {
+                var terminal = await _inner.TryTransitionAsync(
+                    approvalId,
+                    ApprovalState.Applying,
+                    current => current with { State = ApprovalState.FailedTerminal, ApplyingSinceUtc = null, FailureCode = "apply_outcome_unknown" },
+                    cancellationToken);
+                return new ApprovalTransitionResult(ApprovalTransitionStatus.UnexpectedState, terminal.Approval);
+            }
+
+            return await _inner.TryTransitionAsync(approvalId, expectedState, transition, cancellationToken);
+        }
+
+        public ValueTask<IReadOnlyList<PendingApproval>> ListAllAsync(CancellationToken cancellationToken = default)
+            => _inner.ListAllAsync(cancellationToken);
+
+        public ValueTask SweepExpiredAsync(CancellationToken cancellationToken = default)
+            => _inner.SweepExpiredAsync(cancellationToken);
     }
 
     private sealed class DenyAllAuthorizationPolicy : IProgrammaticAuthorizationPolicy

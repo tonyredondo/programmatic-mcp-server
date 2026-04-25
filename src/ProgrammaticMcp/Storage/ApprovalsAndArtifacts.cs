@@ -559,7 +559,7 @@ public sealed class InMemoryApprovalStore : ApprovalStoreBase
     /// <inheritdoc />
     protected override ValueTask CreateCoreAsync(PendingApproval approval, CancellationToken cancellationToken)
     {
-        if (!_entries.TryAdd(approval.ApprovalId, new ApprovalEntry(approval)))
+        if (!_entries.TryAdd(approval.ApprovalId, new ApprovalEntry(CloneApproval(approval))))
         {
             throw new InvalidOperationException($"Approval '{approval.ApprovalId}' already exists.");
         }
@@ -571,7 +571,7 @@ public sealed class InMemoryApprovalStore : ApprovalStoreBase
     protected override ValueTask<PendingApproval?> GetCoreAsync(string approvalId, CancellationToken cancellationToken)
     {
         CleanupExpired(DateTimeOffset.UtcNow);
-        return ValueTask.FromResult(_entries.TryGetValue(approvalId, out var entry) ? entry.Current : null);
+        return ValueTask.FromResult(_entries.TryGetValue(approvalId, out var entry) ? CloneApproval(entry.Current) : null);
     }
 
     /// <inheritdoc />
@@ -585,6 +585,7 @@ public sealed class InMemoryApprovalStore : ApprovalStoreBase
                 && approval.ConversationId == conversationId
                 && approval.CallerBindingId == callerBindingId)
             .OrderBy(static approval => approval.CreatedAt)
+            .Select(CloneApproval)
             .ToArray();
         return ValueTask.FromResult<IReadOnlyList<PendingApproval>>(results);
     }
@@ -593,7 +594,7 @@ public sealed class InMemoryApprovalStore : ApprovalStoreBase
     protected override ValueTask<IReadOnlyList<PendingApproval>> ListAllCoreAsync(CancellationToken cancellationToken)
     {
         CleanupExpired(DateTimeOffset.UtcNow);
-        return ValueTask.FromResult<IReadOnlyList<PendingApproval>>(_entries.Values.Select(static entry => entry.Current).OrderBy(static approval => approval.CreatedAt).ToArray());
+        return ValueTask.FromResult<IReadOnlyList<PendingApproval>>(_entries.Values.Select(static entry => entry.Current).OrderBy(static approval => approval.CreatedAt).Select(CloneApproval).ToArray());
     }
 
     /// <inheritdoc />
@@ -614,11 +615,11 @@ public sealed class InMemoryApprovalStore : ApprovalStoreBase
         {
             if (entry.Current.State != expectedState)
             {
-                return new ApprovalTransitionResult(ApprovalTransitionStatus.UnexpectedState, entry.Current);
+                return new ApprovalTransitionResult(ApprovalTransitionStatus.UnexpectedState, CloneApproval(entry.Current));
             }
 
-            entry.Current = transition(entry.Current);
-            return new ApprovalTransitionResult(ApprovalTransitionStatus.Success, entry.Current);
+            entry.Current = CloneApproval(transition(CloneApproval(entry.Current)));
+            return new ApprovalTransitionResult(ApprovalTransitionStatus.Success, CloneApproval(entry.Current));
         }
         finally
         {
@@ -659,7 +660,7 @@ public sealed class InMemoryApprovalStore : ApprovalStoreBase
                     && entry.Current.ApplyingSinceUtc is { } applyingSince
                     && applyingSince <= cutoff)
                 {
-                    entry.Current = transition(entry.Current);
+                    entry.Current = PreserveRecoveredApprovalExpiry(transition(CloneApproval(entry.Current)), DateTimeOffset.UtcNow);
                     recovered++;
                 }
             }
@@ -676,11 +677,46 @@ public sealed class InMemoryApprovalStore : ApprovalStoreBase
     {
         foreach (var pair in _entries)
         {
-            if (pair.Value.Current.ExpiresAt <= utcNow)
+            if (pair.Value.Current.State != ApprovalState.Applying && pair.Value.Current.ExpiresAt <= utcNow)
             {
                 _entries.TryRemove(pair.Key, out _);
             }
         }
+    }
+
+    /// <summary>
+    /// Creates an approval copy whose mutable JSON payloads cannot mutate the stored record by reference.
+    /// </summary>
+    private static PendingApproval CloneApproval(PendingApproval approval)
+        => approval with
+        {
+            Args = approval.Args.DeepClone().AsObject(),
+            PreviewEnvelope = ClonePreviewEnvelope(approval.PreviewEnvelope)
+        };
+
+    /// <summary>
+    /// Creates a mutation preview envelope copy with detached mutable JSON payloads.
+    /// </summary>
+    private static MutationPreviewEnvelope ClonePreviewEnvelope(MutationPreviewEnvelope envelope)
+        => envelope with
+        {
+            Args = envelope.Args.DeepClone().AsObject(),
+            Preview = envelope.Preview?.DeepClone()
+        };
+
+    /// <summary>
+    /// Keeps recovered approvals observable when their original TTL expired before stale-apply recovery ran.
+    /// </summary>
+    private static PendingApproval PreserveRecoveredApprovalExpiry(PendingApproval approval, DateTimeOffset utcNow)
+    {
+        if (approval.ExpiresAt > utcNow)
+        {
+            return approval;
+        }
+
+        var originalTtl = approval.ExpiresAt - approval.CreatedAt;
+        var recoveredTtl = originalTtl > TimeSpan.Zero ? originalTtl : TimeSpan.FromMinutes(10);
+        return approval with { ExpiresAt = utcNow.Add(recoveredTtl) };
     }
 
     private sealed class ApprovalEntry

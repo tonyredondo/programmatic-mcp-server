@@ -91,6 +91,73 @@ public sealed class JintCodeExecutorTests
     }
 
     [Fact]
+    public async Task PromiseAllSerializesSamplingAndCapabilityHostDispatch()
+    {
+        var sync = new object();
+        var activeCalls = 0;
+        var maxObserved = 0;
+
+        async Task TrackHostCallAsync(CancellationToken cancellationToken)
+        {
+            lock (sync)
+            {
+                activeCalls++;
+                maxObserved = Math.Max(maxObserved, activeCalls);
+            }
+
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(40), cancellationToken);
+            }
+            finally
+            {
+                lock (sync)
+                {
+                    activeCalls--;
+                }
+            }
+        }
+
+        var fixture = CreateFixture(
+            configureBuilder: builder =>
+                builder.AddCapability<ValueInput, int>(
+                    "math.serializedEcho",
+                    capability => capability
+                        .WithDescription("Returns a delayed value.")
+                        .UseWhen("You need to observe serialized dispatch.")
+                        .DoNotUseWhen("You need parallel host execution.")
+                        .WithHandler(async (input, context) =>
+                        {
+                            await TrackHostCallAsync(context.CancellationToken);
+                            return input.Value;
+                        })));
+        using var services = new SamplingServiceProvider(
+            publicClient: new DelegateSamplingClient(
+                async (request, cancellationToken) =>
+                {
+                    await TrackHostCallAsync(cancellationToken);
+                    return new ProgrammaticSamplingResult("sampled:" + request.Messages.Single().Text, "fake-model", "endTurn");
+                }));
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return await Promise.all([
+                        programmatic.client.sample({ messages: [{ role: "user", text: "Hello" }] }),
+                        programmatic.math.serializedEcho({ value: 2 })
+                    ]);
+                }
+                """,
+                VisibleApiPaths: new[] { "math.serializedEcho" },
+                Services: services));
+
+        Assert.Equal("""["sampled:Hello",2]""", CanonicalJson.Serialize(result.Result));
+        Assert.Equal(1, maxObserved);
+    }
+
+    [Fact]
     public async Task VisibleApiPathsRestrictTheNamespaceAndHideTheRawBridge()
     {
         var fixture = CreateFixture();
@@ -316,6 +383,72 @@ public sealed class JintCodeExecutorTests
         Assert.Equal("dual-interface structured path", result.Result?.GetValue<string>());
         Assert.Equal(0, client.PublicCallCount);
         Assert.Equal(2, client.StructuredCallCount);
+    }
+
+    [Fact]
+    public async Task ClientSampleValidatesDualInterfaceRequestsBeforeCallingPublicClient()
+    {
+        var fixture = CreateFixture();
+        var client = new DualInterfaceSamplingClient(
+            new Func<ProgrammaticStructuredSamplingRequest, ProgrammaticStructuredSamplingResult>[]
+            {
+                _ => new ProgrammaticStructuredSamplingResult(
+                    "assistant",
+                    [new ProgrammaticStructuredSamplingTextBlock("should not be reached")],
+                    "fake-model",
+                    "endTurn")
+            });
+        using var services = new SamplingServiceProvider(publicClient: client, structuredClient: client);
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    try {
+                        return await programmatic.client.sample({ messages: [] });
+                    } catch (error) {
+                        return error.code;
+                    }
+                }
+                """,
+                VisibleApiPaths: Array.Empty<string>(),
+                Services: services));
+
+        Assert.Equal("invalid_params", result.Result?.GetValue<string>());
+        Assert.Equal(0, client.PublicCallCount);
+        Assert.Equal(0, client.StructuredCallCount);
+    }
+
+    [Fact]
+    public async Task DictionaryKeysPreserveCasingAcrossTheJavaScriptBridge()
+    {
+        var fixture = CreateFixture(
+            configureBuilder: builder =>
+                builder.AddCapability<DictionaryEchoInput, DictionaryEchoInput>(
+                    "metadata.echo",
+                    capability => capability
+                        .WithDescription("Echoes dictionary values.")
+                        .UseWhen("You need to verify dictionary key casing.")
+                        .DoNotUseWhen("You need scalar examples.")
+                        .WithHandler((input, _) => ValueTask.FromResult(input))));
+
+        var result = await fixture.Executor.ExecuteAsync(
+            new CodeExecutionRequest(
+                "conv-1",
+                """
+                async function main() {
+                    return await programmatic.metadata.echo({
+                        values: {
+                            UserName: "Ada",
+                            "UPPER-Key": "VALUE"
+                        }
+                    });
+                }
+                """,
+                VisibleApiPaths: new[] { "metadata.echo" }));
+
+        Assert.Equal("""{"values":{"UPPER-Key":"VALUE","UserName":"Ada"}}""", CanonicalJson.Serialize(result.Result));
     }
 
     [Fact]
@@ -993,7 +1126,8 @@ public sealed class JintCodeExecutorTests
             options: new JintExecutorOptions
             {
                 MemoryBytes = 200_000,
-                MaxStatements = 100_000
+                MaxStatements = 1_000_000,
+                TimeoutMs = 30_000
             });
 
         var result = await fixture.Executor.ExecuteAsync(
@@ -1002,13 +1136,17 @@ public sealed class JintCodeExecutorTests
                 """
                 async function main() {
                     const values = [];
-                    while (true) {
-                        values.push("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+                    const chunk = "x".repeat(16 * 1024);
+                    for (let index = 0; index < 10000; index++) {
+                        values.push(chunk + index);
                     }
+                    return values.length;
                 }
                 """));
 
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "memory_limit_exceeded");
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "timeout");
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "statement_limit_exceeded");
     }
 
     [Fact]
@@ -1201,6 +1339,8 @@ public sealed class JintCodeExecutorTests
 
     private sealed record EmptyInput;
 
+    private sealed record DictionaryEchoInput(Dictionary<string, string> Values);
+
     private sealed record ArtifactEmitInput(string Content);
 
     private sealed record ArtifactEmitResult(string ArtifactId);
@@ -1230,6 +1370,17 @@ public sealed class JintCodeExecutorTests
             var text = request.Messages.Single().Text;
             return ValueTask.FromResult(new ProgrammaticSamplingResult("sampled:" + text, "fake-model", "endTurn"));
         }
+    }
+
+    private sealed class DelegateSamplingClient(
+        Func<ProgrammaticSamplingRequest, CancellationToken, ValueTask<ProgrammaticSamplingResult>> createMessage) : IProgrammaticSamplingClient
+    {
+        public bool IsSupported => true;
+
+        public bool SupportsToolUse => false;
+
+        public ValueTask<ProgrammaticSamplingResult> CreateMessageAsync(ProgrammaticSamplingRequest request, CancellationToken cancellationToken = default)
+            => createMessage(request, cancellationToken);
     }
 
     private sealed class ThrowingSamplingClient(string code) : IProgrammaticSamplingClient

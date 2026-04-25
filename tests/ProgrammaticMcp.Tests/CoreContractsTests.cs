@@ -77,6 +77,45 @@ public sealed class CoreContractsTests
         Assert.Contains("__proto__", exception.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("items.delete", "delete")]
+    [InlineData("delete.items", "delete")]
+    [InlineData("items.interface", "interface")]
+    [InlineData("items.type", "type")]
+    [InlineData("items.await", "await")]
+    public void TypeScriptReservedApiPathSegmentsAreRejected(string apiPath, string reservedSegment)
+    {
+        var builder = new ProgrammaticMcpBuilder();
+
+        builder.AddCapability<ListProjectsInput, ListProjectsResult>(
+            apiPath,
+            capability => capability
+                .WithDescription("bad")
+                .UseWhen("never")
+                .DoNotUseWhen("always")
+                .WithHandler((_, _) => ValueTask.FromResult(new ListProjectsResult(Array.Empty<string>()))));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => builder.BuildCatalog());
+        Assert.Contains(reservedSegment, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NearMissReservedApiPathSegmentsAreAllowed()
+    {
+        var catalog = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddCapability<ListProjectsInput, ListProjectsResult>(
+                "items.deleteTask",
+                capability => capability
+                    .WithDescription("Deletes a task.")
+                    .UseWhen("You need to test near-miss path names.")
+                    .DoNotUseWhen("You need reserved path names.")
+                    .WithHandler((_, _) => ValueTask.FromResult(new ListProjectsResult(Array.Empty<string>()))))
+            .BuildCatalog();
+
+        Assert.Equal("items.deleteTask", Assert.Single(catalog.Capabilities).ApiPath);
+    }
+
     [Fact]
     public void ClientNamespaceIsReserved()
     {
@@ -450,6 +489,66 @@ public sealed class CoreContractsTests
     }
 
     [Fact]
+    public void RuntimeValidationEnforcesConstBeforeComposition()
+    {
+        var objectConstSchema = JsonNode.Parse(
+            """
+            {
+              "const": { "a": 1, "b": [true, false] },
+              "anyOf": [
+                { "type": "object", "additionalProperties": true }
+              ]
+            }
+            """)!;
+        JsonSchemaValidator.Validate(JsonNode.Parse("""{"b":[true,false],"a":1}"""), objectConstSchema);
+
+        var objectException = Assert.Throws<JsonSchemaValidationException>(
+            () => JsonSchemaValidator.Validate(JsonNode.Parse("""{"a":1,"b":[false,true]}"""), objectConstSchema));
+        Assert.Contains("constant", objectException.Message, StringComparison.OrdinalIgnoreCase);
+
+        var referenceConstSchema = JsonNode.Parse(
+            """
+            {
+              "const": "tasks.complete",
+              "$ref": "#/$defs/name",
+              "$defs": {
+                "name": { "type": "string" }
+              }
+            }
+            """)!;
+        JsonSchemaValidator.Validate(JsonValue.Create("tasks.complete"), referenceConstSchema);
+
+        var referenceException = Assert.Throws<JsonSchemaValidationException>(
+            () => JsonSchemaValidator.Validate(JsonValue.Create("tasks.delete"), referenceConstSchema));
+        Assert.Contains("constant", referenceException.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void MutationPreviewEnvelopeValidationEnforcesMutationNameConst()
+    {
+        var argsSchema = new BuiltInSchemaGenerator().Generate(typeof(CompleteTaskArgs));
+        var previewSchema = new BuiltInSchemaGenerator().Generate(typeof(CompleteTaskPreview));
+        var schema = MutationEnvelopeSchemaFactory.CreatePreviewEnvelopeSchema("tasks.complete", argsSchema, previewSchema);
+        var payload = JsonNode.Parse(
+            """
+            {
+              "kind": "mutation_preview",
+              "approvalId": "approval-1",
+              "approvalNonce": "nonce-1",
+              "mutationName": "tasks.delete",
+              "summary": "Complete task",
+              "args": { "taskId": "task-1" },
+              "preview": { "taskId": "task-1", "willComplete": true },
+              "actionArgsHash": "hash",
+              "expiresAt": "2026-03-19T00:00:00Z"
+            }
+            """);
+
+        var exception = Assert.Throws<JsonSchemaValidationException>(() => JsonSchemaValidator.Validate(payload, schema));
+        Assert.Contains("constant", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void GeneratedTypeScriptAndCapabilityVersionAreDeterministic()
     {
         var first = CreateDeterministicCatalog("Lists projects.");
@@ -549,6 +648,60 @@ public sealed class CoreContractsTests
             .BuildCatalog();
 
         Assert.Contains("(number | null)[]", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GeneratedTypeScriptUsesClosedEmptyObjectAndConstLiteralTypes()
+    {
+        var catalog = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddCapability<EmptyInput, DictionaryContainer>(
+                "metadata.list",
+                capability => capability
+                    .WithDescription("Lists metadata.")
+                    .UseWhen("You need empty input and dictionary output.")
+                    .DoNotUseWhen("You need other schema paths.")
+                    .WithHandler((_, _) => ValueTask.FromResult(new DictionaryContainer(new Dictionary<string, int>()))))
+            .AddMutation<CompleteTaskArgs, CompleteTaskPreview, CompleteTaskApplyResult>(
+                "tasks.complete",
+                mutation => mutation
+                    .WithDescription("Completes a task.")
+                    .UseWhen("You are sure the task should be completed.")
+                    .DoNotUseWhen("You are only exploring.")
+                    .WithPreviewHandler((args, _) => ValueTask.FromResult(new CompleteTaskPreview(args.TaskId, true)))
+                    .WithSummaryFactory((args, _, _) => ValueTask.FromResult($"Complete {args.TaskId}"))
+                    .WithApplyHandler((args, _) => ValueTask.FromResult(MutationApplyResult<CompleteTaskApplyResult>.Success(new CompleteTaskApplyResult(args.TaskId, "done")))))
+            .BuildCatalog();
+
+        Assert.Contains("type MetadataListInput = Record<string, never>;", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Contains("values: Record<string, number>", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+        Assert.Contains("mutationName: \"tasks.complete\"", catalog.GeneratedTypeScript, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CapabilityResultSerializationPreservesDictionaryKeysAsData()
+    {
+        var catalog = new ProgrammaticMcpBuilder()
+            .AllowAllBoundCallers()
+            .AddCapability<EmptyInput, DictionaryStringContainer>(
+                "metadata.keys",
+                capability => capability
+                    .WithDescription("Returns dictionary keys.")
+                    .UseWhen("You need dictionary key casing.")
+                    .DoNotUseWhen("You need other serialization examples.")
+                    .WithHandler((_, _) => ValueTask.FromResult(
+                        new DictionaryStringContainer(
+                            new Dictionary<string, string>
+                            {
+                                ["UserName"] = "Ada",
+                                ["UPPER-Key"] = "VALUE"
+                            }))))
+            .BuildCatalog();
+        var handler = catalog.Capabilities.Single().CapabilityHandler!;
+
+        var result = await handler(new JsonObject(), new ProgrammaticCapabilityContext("conv-1", null, NullServiceProvider.Instance, CancellationToken.None, null));
+
+        Assert.Equal("""{"values":{"UPPER-Key":"VALUE","UserName":"Ada"}}""", CanonicalJson.Serialize(result));
     }
 
     [Fact]
@@ -737,6 +890,47 @@ public sealed class CoreContractsTests
     }
 
     [Fact]
+    public async Task InMemoryApprovalStoreDetachesMutableApprovalPayloads()
+    {
+        var approval = CreateApproval();
+        var store = new InMemoryApprovalStore();
+        await store.CreateAsync(approval);
+
+        approval.Args["taskId"] = "mutated-original";
+        approval.PreviewEnvelope.Args["taskId"] = "mutated-original";
+        approval.PreviewEnvelope.Preview!.AsObject()["willComplete"] = false;
+
+        var stored = await store.GetAsync(approval.ApprovalId);
+        Assert.Equal("task-1", stored!.Args["taskId"]!.GetValue<string>());
+        Assert.Equal("task-1", stored.PreviewEnvelope.Args["taskId"]!.GetValue<string>());
+        Assert.True(stored.PreviewEnvelope.Preview!["willComplete"]!.GetValue<bool>());
+
+        stored.Args["taskId"] = "mutated-get";
+        stored.PreviewEnvelope.Args["taskId"] = "mutated-get";
+        stored.PreviewEnvelope.Preview!.AsObject()["willComplete"] = false;
+
+        var listed = Assert.Single(await store.ListPendingAsync("conv-1", "caller-1"));
+        Assert.Equal("task-1", listed.Args["taskId"]!.GetValue<string>());
+        Assert.Equal("task-1", listed.PreviewEnvelope.Args["taskId"]!.GetValue<string>());
+        Assert.True(listed.PreviewEnvelope.Preview!["willComplete"]!.GetValue<bool>());
+
+        listed.Args["taskId"] = "mutated-list";
+        var transition = await store.TryTransitionAsync(
+            approval.ApprovalId,
+            ApprovalState.Pending,
+            current =>
+            {
+                current.Args["taskId"] = "mutated-transition-input";
+                return current with { State = ApprovalState.Applying, ApplyingSinceUtc = DateTimeOffset.UtcNow };
+            });
+        Assert.Equal(ApprovalTransitionStatus.Success, transition.Status);
+        transition.Approval!.Args["taskId"] = "mutated-transition-result";
+
+        var final = await store.GetAsync(approval.ApprovalId);
+        Assert.Equal("mutated-transition-input", final!.Args["taskId"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task ArtifactStoreEnforcesQuotasAndSweepsExpiredEntriesUnderLoad()
     {
         var options = new ArtifactRetentionOptions(
@@ -810,7 +1004,8 @@ public sealed class CoreContractsTests
         {
             ApprovalId = "00000000-0000-0000-0000-000000000001",
             State = ApprovalState.Applying,
-            ApplyingSinceUtc = DateTimeOffset.UtcNow.AddMinutes(-5)
+            ApplyingSinceUtc = DateTimeOffset.UtcNow.AddMinutes(-5),
+            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1)
         };
         var expired = CreateApproval() with
         {
@@ -836,9 +1031,11 @@ public sealed class CoreContractsTests
         Assert.NotNull(recoveredApproval);
         Assert.Equal(ApprovalState.FailedTerminal, recoveredApproval!.State);
         Assert.Equal("apply_outcome_unknown", recoveredApproval.FailureCode);
+        Assert.True(recoveredApproval.ExpiresAt > DateTimeOffset.UtcNow);
 
         await store.SweepExpiredAsync();
         Assert.Null(await store.GetAsync(expired.ApprovalId));
+        Assert.NotNull(await store.GetAsync(stale.ApprovalId));
     }
 
     [Fact]
@@ -963,6 +1160,8 @@ public sealed class CoreContractsTests
     public sealed record RepeatedLeaf(int Count);
 
     public sealed record DictionaryContainer(Dictionary<string, int> Values);
+
+    public sealed record DictionaryStringContainer(Dictionary<string, string> Values);
 
     public sealed record AliasedPropertyInput([property: JsonPropertyName("task-id")] string TaskId);
 

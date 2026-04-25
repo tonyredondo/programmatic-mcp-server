@@ -235,7 +235,7 @@ The repository does not currently provide:
 - product-specific business logic
 - automatic CORS policy configuration
 - a shared built-in approval or artifact store for multi-process deployments
-- the `programmatic.client.*` runtime namespace for user-defined capabilities or mutations; `client` is now reserved for forward compatibility
+- reserved generated TypeScript identifiers, including `client`, JavaScript/TypeScript keywords, and prototype-pollution-sensitive names, as user-defined capability or mutation path segments
 
 ## Documentation Map
 

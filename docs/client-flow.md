@@ -27,4 +27,4 @@ The normal HTTP MCP sequence is:
 - Clients treat `programmatic.client.sample(...)` as an execution-time helper, not as a capability path. It is available only during explicitly scoped read-only `code.execute` runs. On the stateful ASP.NET transport it can use the connected MCP client when that client advertises sampling; in direct non-ASP.NET execution it remains unavailable unless the host injects its own sampling client, and that injected path still uses the same explicit read-only scope rules.
 - Clients keep the `approvalId` + `approvalNonce` pair from preview-producing execution results when they want to apply or cancel later. `mutation.list` re-discloses approval ids, but it does not return approval nonces.
 - Clients should treat mutation previews as advisory and expect apply-time revalidation.
-- Clients must not register or rely on host capability paths under the reserved top-level `client` namespace.
+- Clients must not register or rely on host capability paths that use reserved generated TypeScript identifiers such as `client`, JavaScript/TypeScript keywords, or prototype-pollution-sensitive names.

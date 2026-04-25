@@ -116,6 +116,11 @@ public static class TypeScriptDeclarationGenerator
     private static string RenderTypeScript(JsonNode schema, IReadOnlyDictionary<string, string> definitionAliases)
     {
         var schemaObject = schema.AsObject();
+        if (schemaObject.TryGetPropertyValue("const", out var constNode) && (constNode is null || constNode is JsonValue))
+        {
+            return constNode?.ToJsonString() ?? "null";
+        }
+
         if (schemaObject["anyOf"] is JsonArray anyOfArray)
         {
             return string.Join(
@@ -176,6 +181,12 @@ public static class TypeScriptDeclarationGenerator
             if (schema["additionalProperties"] is JsonObject additionalProperties)
             {
                 return $"Record<string, {RenderTypeScript(additionalProperties, definitionAliases)}>";
+            }
+
+            if (schema["additionalProperties"] is JsonValue additionalPropertiesValue
+                && additionalPropertiesValue.TryGetValue<bool>(out var additionalPropertiesAllowed))
+            {
+                return additionalPropertiesAllowed ? "Record<string, unknown>" : "Record<string, never>";
             }
 
             return "Record<string, unknown>";

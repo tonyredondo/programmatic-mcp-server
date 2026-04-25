@@ -477,6 +477,51 @@ public sealed class ProgrammaticMcpSampleServerTests
         Assert.Contains("open", handlerResult["summary"]!.GetValue<string>(), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task SampleServerStatefulJsSamplingTimesOutSlowSampling()
+    {
+        var samplingStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSampling = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var factory = CreateFactory();
+        await using var client = await CreateSessionClientAsync(
+            factory,
+            CreateSamplingClientOptions(
+                async (_, cancellationToken) =>
+                {
+                    samplingStarted.TrySetResult();
+                    await releaseSampling.Task.WaitAsync(cancellationToken);
+                    return new CreateMessageResult
+                    {
+                        Role = Role.Assistant,
+                        Model = "sample-test-model",
+                        StopReason = "endTurn",
+                        Content = [new TextContentBlock { Text = "late sample" }]
+                    };
+                }));
+
+        var result = await client.CallToolAsync(
+            "code.execute",
+            new Dictionary<string, object?>
+            {
+                ["conversationId"] = "sample-js-sampling-timeout",
+                ["visibleApiPaths"] = Array.Empty<string>(),
+                ["timeoutMs"] = 100,
+                ["code"] = """
+                           async function main() {
+                               return await programmatic.client.sample({
+                                   messages: [{ role: "user", text: "This should time out." }]
+                               });
+                           }
+                           """
+            });
+
+        var payload = ParseStructuredContent(result);
+        var diagnostic = Assert.Single(payload["diagnostics"]!.AsArray());
+        Assert.Equal("timeout", diagnostic!["code"]!.GetValue<string>());
+        await samplingStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseSampling.TrySetResult();
+    }
+
     private static WebApplicationFactory<Program> CreateFactory()
     {
         return new WebApplicationFactory<Program>()
@@ -513,6 +558,11 @@ public sealed class ProgrammaticMcpSampleServerTests
     private static McpClientOptions CreateSamplingClientOptions(
         Func<CreateMessageRequestParams, ValueTask<CreateMessageResult>> handler,
         bool supportsToolUse = true)
+        => CreateSamplingClientOptions((request, _) => handler(request), supportsToolUse);
+
+    private static McpClientOptions CreateSamplingClientOptions(
+        Func<CreateMessageRequestParams, CancellationToken, ValueTask<CreateMessageResult>> handler,
+        bool supportsToolUse = true)
     {
         return new McpClientOptions
         {
@@ -525,7 +575,7 @@ public sealed class ProgrammaticMcpSampleServerTests
             },
             Handlers = new McpClientHandlers
             {
-                SamplingHandler = (request, _, _) => handler(request!)
+                SamplingHandler = (request, _, cancellationToken) => handler(request!, cancellationToken)
             }
         };
     }
